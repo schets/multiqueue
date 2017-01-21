@@ -8,12 +8,26 @@ The most general use case of the queue looks something like this:
 
 Each logical consumer receieves the event once, but a logical consumer might actually demultiplex the input over a set of consumers       
 ```
-         @
-        /
--> @ -> -> @ (really @+@+@)
-        \
-         @
+-> @        @
+    \      /
+     -> -> -> @' (really @+@+@ each compete for a spot)
+    /      \
+-> @        @
 
 ```
+
+If this diagram is redrawn with each of the producers sending in a sequenced element (time goes left  to right):
+
+
+```
+t=1|t=2|    t=3    | t=4| 
+1 -> @              @ (1, 2)
+      \            /
+       -> 2 -> 1 -> -> @' (really @ (1) + @ (2) + @ (nothing yet))
+      /            \
+2 -> @              @ (1, 2)
+
+```
+
 
 I apologize for anyone who sees the readme in this state, it's certainly not complete.

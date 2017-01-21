@@ -177,7 +177,6 @@ impl ReadCursor {
         }
     }
 
-    #[inline(always)]
     pub fn get_max_diff(&self, cur_writer: usize) -> Option<u32> {
         loop {
             unsafe {
@@ -189,12 +188,13 @@ impl ReadCursor {
                 // for changes. This is extremely similar to the seqlock except
                 // with the pointer as the sequence lock instead of a different int
                 //
-                // We don't need another acquire fence here sincea the
+                // We don't need another acquire fence here since the
                 // relevant loads in get_max_diff are going to ordered
                 // before all loads after the function exit, and also
                 // ordered after the original pointer load
-                let second_ptr = self.readers.load(Ordering::Relaxed);
+                let second_ptr = self.readers.load(MAYBE_ACQUIRE);
                 if second_ptr == first_ptr {
+                    maybe_acquire_fence();
                     return rval;
                 }
             }
