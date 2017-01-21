@@ -137,7 +137,7 @@ impl<T> MultiQueue<T> {
         let (chead, wrap_valid_tag) = transaction.get();
         self.tail.prefetch_metadata(); // See push_multi on this
         unsafe {
-        let write_cell = &mut *self.data.offset(chead);
+            let write_cell = &mut *self.data.offset(chead);
             let tail_cache = self.tail_cache.load(Relaxed);
             if transaction.matches_previous(tail_cache) {
                 let new_tail = self.reload_tail_single(wrap_valid_tag);
@@ -174,16 +174,20 @@ impl<T> MultiQueue<T> {
         }
     }
 
-    fn reload_tail_multi(&self, count: usize, tail_cache: usize) -> usize {
+    fn reload_tail_multi(&self, tail_cache: usize, count: usize) -> usize {
         // This shows how far behind from head the reader is
         if let Some(max_diff_from_head) = self.tail.get_max_diff(count) {
             let current_tail = CountedIndex::get_previous(count, max_diff_from_head);
+            if tail_cache == current_tail {
+                return current_tail;
+            }
             match self.tail_cache.compare_exchange(tail_cache, current_tail, AcqRel, Relaxed) {
-                Ok(val) => val,
+                Ok(val) => current_tail,
                 Err(val) => val,
             }
         } else {
-            self.tail_cache.load(Acquire)
+            let rval = self.tail_cache.load(Acquire);
+            rval
         }
     }
 
@@ -287,6 +291,7 @@ mod test {
     use self::crossbeam::scope;
 
     use std::sync::atomic::Ordering::*;
+    use std::thread::yield_now;
 
     use std::sync::Barrier;
 
@@ -306,44 +311,65 @@ mod test {
         }
     }
 
-    fn spsc_broadcast(receivers: usize) {
-        let (writer, reader) = MultiQueue::<usize>::new(10);
-        let myb = Barrier::new(receivers + 1);
+    fn mpsc_broadcast(senders: usize, receivers: usize) {
+        let (writer, reader) = MultiQueue::<(usize, usize)>::new(10);
+        let myb = Barrier::new(receivers + senders);
         let bref = &myb;
-        let num_loop = 1000000;
+        let num_loop = 100000;
         scope(|scope| {
-            scope.spawn(move || {
-                bref.wait();
-                for i in 0..num_loop {
-                    loop {
-                        if writer.push(i).is_ok() {
-                            break;
-                        }
-                    }
-                }
-            });
-            for i in 0..(receivers - 1) {
-                let this_reader = reader.add_reader();
+            for q in 0..senders {
+                let cur_writer = writer.clone();
                 scope.spawn(move || {
                     bref.wait();
-                    for i in 0..num_loop {
+                    'outer: for i in 0..num_loop {
+                        for j in 0..100000000 {
+                            if cur_writer.push((q, i)).is_ok() {
+                                continue 'outer;
+                            }
+                            yield_now();
+                        }
+                        assert!(false, "Writer could not write");
+                    }
+                });
+            }
+            {
+                let _ = writer;
+            }; // Dump writer so we don't waste too much time on it
+            for _ in 0..(receivers - 1) {
+                let this_reader = reader.add_reader();
+                scope.spawn(move || {
+                    let mut myv = Vec::new();
+                    for _ in 0..senders {
+                        myv.push(0);
+                    }
+                    bref.wait();
+                    for _ in 0..num_loop * senders {
                         loop {
                             if let Some(val) = this_reader.pop() {
-                                assert_eq!(i, val);
+                                assert_eq!(myv[val.0], val.1);
+                                myv[val.0] += 1;
                                 break;
                             }
+                            yield_now();
                         }
                     }
                 });
             }
+            let mut myv = Vec::new();
+            for _ in 0..senders {
+                myv.push(0);
+            }
             bref.wait();
-            'outer: for i in 0..num_loop {
-                loop {
+            'outer: for i in 0..num_loop * senders {
+                for _ in 0..100000000 {
                     if let Some(val) = reader.pop() {
-                        assert_eq!(i, val);
-                        break;
+                        assert_eq!(myv[val.0], val.1);
+                        myv[val.0] += 1;
+                        continue 'outer;
                     }
+                    yield_now();
                 }
+                assert!(false, "Reader could not read");
             }
         });
         assert!(reader.pop().is_none());
@@ -351,12 +377,22 @@ mod test {
 
     #[test]
     fn test_spsc() {
-        spsc_broadcast(1);
+        mpsc_broadcast(1, 1);
     }
 
     #[test]
     fn test_spsc_broadcast() {
-        spsc_broadcast(3);
+        mpsc_broadcast(1, 3);
+    }
+
+    #[test]
+    fn test_mpsc_single() {
+        mpsc_broadcast(2, 1);
+    }
+
+    #[test]
+    fn test_mpsc_broadcast() {
+        mpsc_broadcast(2, 3);
     }
 
 }
