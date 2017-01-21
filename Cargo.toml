@@ -1,0 +1,8 @@
+[package]
+name = "multiqueue"
+version = "0.1.0"
+authors = ["Sam Schetterer <samschet@gmail.com>"]
+
+[dependencies]
+crossbeam = "0.2"
+time = "*"
