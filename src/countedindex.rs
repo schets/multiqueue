@@ -4,17 +4,22 @@ pub fn get_valid_wrap(val: u32) -> u32 {
     let max = 1 << 30;
     if val >= max {
         max
-    }
-    else {
+    } else {
         val.next_power_of_two()
     }
 }
 
 fn validate_wrap(val: u32) {
-    assert!(val.is_power_of_two(), "Multiqueue error - non power-of-two size received");
-    assert!(val <= (1 << 30), "Multiqueue error - too large size received");
+    assert!(val.is_power_of_two(),
+            "Multiqueue error - non power-of-two size received");
+    assert!(val <= (1 << 30),
+            "Multiqueue error - too large size received");
     assert!(val > 0, "Multiqueue error - zero size received");
 }
+
+// A queue entry will never ever have this value as an initial valid flag
+// Since the upper 2/66 bits will never be set
+pub const INITIAL_QUEUE_FLAG: usize = ::std::usize::MAX;
 
 pub struct CountedIndex {
     val: AtomicUsize,
@@ -75,23 +80,16 @@ impl CountedIndex {
     }
 
     #[inline(always)]
-    pub fn get_previous(&self, by: u32) -> usize {
-        self.val.load(Ordering::Relaxed).wrapping_sub(by as usize)
+    pub fn get_previous(start: usize, by: u32) -> usize {
+        start.wrapping_sub(by as usize)
     }
 }
 
 impl<'a> Transaction<'a> {
-
+    /// Loads the index and the expected valid flag
     #[inline(always)]
     pub fn get(&self) -> (isize, usize) {
-        ((self.loaded_vals & self.mask) as isize, self.loaded_vals.wrapping_add(self.mask).wrapping_add(1))
-    }
-
-    /// Returns true is the usize passed matches the value
-    /// held by the transaction
-    #[inline(always)]
-    pub fn matches(&self, val: usize) -> bool {
-        self.loaded_vals == val
+        ((self.loaded_vals & self.mask) as isize, self.loaded_vals)
     }
 
     /// Returns true if the values passed in matches the previous wrap-around of the Transaction

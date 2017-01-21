@@ -12,6 +12,5 @@ pub use multiqueue::{multiqueue, MultiReader, MultiWriter};
 #[cfg(test)]
 mod tests {
     #[test]
-    fn it_works() {
-    }
+    fn it_works() {}
 }

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, fence};
 use std::sync::atomic::Ordering::{Relaxed, Acquire, Release};
 
 use alloc;
-use countedindex::{CountedIndex, get_valid_wrap};
+use countedindex::{CountedIndex, get_valid_wrap, INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
 
 use read_cursor::{ReadCursor, Reader};
@@ -63,7 +63,7 @@ impl<T> MultiQueue<T> {
         unsafe {
             for i in 0..capacity as isize {
                 let elem: &QueueEntry<T> = &*queuedat.offset(i);
-                elem.wraps.store(0, Relaxed);
+                elem.wraps.store(INITIAL_QUEUE_FLAG, Relaxed);
             }
         }
 
@@ -102,7 +102,11 @@ impl<T> MultiQueue<T> {
     pub fn push_multi(&self, val: T) -> Result<(), T> {
         let mut transaction = self.head.load_transaction(Relaxed);
 
-        // This ensures that metadata about the cursor group is in cache
+        // This tries to ensure the tail fetch metadata is always in the cache
+        // The effect of this is that whenever one has to find the minimum tail,
+        // the data about the loop is in-cache so that whole loop executes deep in
+        // an out-of-order engine while the branch predictor predicts there is more space
+        // and continues on pushing
         self.tail.prefetch_metadata();
         unsafe {
             loop {
@@ -129,7 +133,7 @@ impl<T> MultiQueue<T> {
 
     pub fn push_single(&self, val: T) -> Result<(), T> {
         let transaction = self.head.load_transaction(Relaxed);
-        self.tail.prefetch_metadata();
+        self.tail.prefetch_metadata(); // See push_multi on this
         unsafe {
             if transaction.matches_previous(self.tail_cache.load(Relaxed)) {
                 if transaction.matches_previous(self.reload_tail_single()) {
@@ -169,8 +173,9 @@ impl<T> MultiQueue<T> {
 
     fn reload_tail_multi(&self, tail_cache: usize) -> usize {
         // This shows how far behind from head the reader is
-        if let Some(max_diff_from_head) = self.tail.get_max_diff(self.head.load_count(Relaxed)) {
-            let current_tail = self.head.get_previous(max_diff_from_head);
+        let chead = self.head.load_count(Relaxed);
+        if let Some(max_diff_from_head) = self.tail.get_max_diff(chead) {
+            let current_tail = CountedIndex::get_previous(chead, max_diff_from_head);
             match self.tail_cache.compare_exchange(tail_cache, current_tail, Relaxed, Acquire) {
                 Ok(val) => val,
                 Err(val) => val,
@@ -181,20 +186,23 @@ impl<T> MultiQueue<T> {
     }
 
     fn reload_tail_single(&self) -> usize {
-        if let Some(max_diff_from_head) = self.tail.get_max_diff(self.head.load_count(Relaxed)) {
-            let current_tail = self.head.get_previous(max_diff_from_head);
+        let chead = self.head.load_count(Relaxed);
+        if let Some(max_diff_from_head) = self.tail.get_max_diff(chead) {
+            let current_tail = CountedIndex::get_previous(chead, max_diff_from_head);
             self.tail_cache.store(current_tail, Relaxed);
             current_tail
         } else {
             // If this assert fires, memory has been corrupted
             assert!(false,
-                    "The write head got ran over by consumers in isngle writer mode");
+                    "The write head got ran over by consumers in single writer mode. This \
+                     process is borked!");
             0
         }
     }
 }
 
 impl<T> MultiWriter<T> {
+
     #[inline(always)]
     pub fn push(&self, val: T) -> Result<(), T> {
         match self.state.get() {
@@ -213,6 +221,8 @@ impl<T> MultiWriter<T> {
 }
 
 impl<T> MultiReader<T> {
+
+    #[inline(always)]
     pub fn pop(&self) -> Option<T> {
         unsafe { self.queue.pop(&*self.reader.load(Relaxed)) }
     }
@@ -301,17 +311,18 @@ mod test {
         }
     }
 
-    fn spsc_broadcast(receivers: usize) {
+    fn spsc_broadcast(senders: usize, receivers: usize) {
         let (writer, reader) = MultiQueue::<usize>::new(10);
         let myb = Barrier::new(receivers + 1);
         let bref = &myb;
         let num_loop = 1000000;
         scope(|scope| {
+            let cur_writer = writer.clone();
             scope.spawn(move || {
                 bref.wait();
-                'outer: for i in 0..num_loop {
+                for i in 0..num_loop {
                     loop {
-                        if writer.push(i).is_ok() {
+                        if cur_writer.push(i).is_ok() {
                             break;
                         }
                     }
@@ -321,7 +332,7 @@ mod test {
                 let this_reader = reader.add_reader();
                 scope.spawn(move || {
                     bref.wait();
-                    'outer: for i in 0..num_loop {
+                    for i in 0..num_loop {
                         loop {
                             if let Some(val) = this_reader.pop() {
                                 assert_eq!(i, val);

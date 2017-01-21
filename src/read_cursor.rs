@@ -202,7 +202,7 @@ impl ReadCursor {
     }
 
     pub fn add_reader(&self, reader: &Reader) -> AtomicPtr<Reader> {
-        // There's no fundamental reason this needs to leak, 
+        // There's no fundamental reason this needs to leak,
         // I just haven't implemented the memory management yet.
         // It's not too hard since we can track readers and writers active
         let mut current_ptr = self.readers.load(Consume);
@@ -216,8 +216,8 @@ impl ReadCursor {
                     .compare_exchange(current_ptr, new_group, Ordering::SeqCst, Ordering::SeqCst) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
-                        return new_reader
-                    },
+                        return new_reader;
+                    }
                     Err(val) => current_ptr = val,
                 }
             }

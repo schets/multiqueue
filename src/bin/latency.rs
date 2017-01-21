@@ -28,7 +28,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
     for _ in 0..tries {
         let start = precise_time_ns();
         let end = precise_time_ns();
-        if (end >= start) {
+        if end >= start {
             succ += 1;
             total_time += (end - start);
         }
@@ -42,9 +42,9 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
                 None => break,
                 Some(pushed) => {
                     let current_time = precise_time_ns();
-                    if (current_time >= pushed) {
+                    if current_time >= pushed {
                         let diff = current_time - pushed;
-                        if (diff > to_subtract) {
+                        if diff > to_subtract {
                             v.push(diff - to_subtract);
                         }
                     }
