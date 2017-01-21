@@ -4,7 +4,7 @@ use std::mem;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, fence};
-use std::sync::atomic::Ordering::{Relaxed, Acquire, Release};
+use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
 
 use alloc;
 use countedindex::{CountedIndex, get_valid_wrap, INITIAL_QUEUE_FLAG};
@@ -111,14 +111,15 @@ impl<T> MultiQueue<T> {
         unsafe {
             loop {
                 let tail_cache = self.tail_cache.load(Acquire);
+                let (chead, wrap_valid_tag) = transaction.get();
+                let write_cell = &mut *self.data.offset(chead);
                 if transaction.matches_previous(tail_cache) {
-                    if transaction.matches_previous(self.reload_tail_multi(tail_cache)) {
+                    let new_tail = self.reload_tail_multi(tail_cache, wrap_valid_tag);
+                    if transaction.matches_previous(new_tail) {
                         return Err(val);
                     }
                 }
                 // This isize conversion is valid since indices are 30 bits
-                let (chead, wrap_valid_tag) = transaction.get();
-                let write_cell = &mut *self.data.offset(chead);
                 match transaction.commit(1, Relaxed) {
                     Some(new_transaction) => transaction = new_transaction,
                     None => {
@@ -133,15 +134,17 @@ impl<T> MultiQueue<T> {
 
     pub fn push_single(&self, val: T) -> Result<(), T> {
         let transaction = self.head.load_transaction(Relaxed);
+        let (chead, wrap_valid_tag) = transaction.get();
         self.tail.prefetch_metadata(); // See push_multi on this
         unsafe {
-            if transaction.matches_previous(self.tail_cache.load(Relaxed)) {
-                if transaction.matches_previous(self.reload_tail_single()) {
+        let write_cell = &mut *self.data.offset(chead);
+            let tail_cache = self.tail_cache.load(Relaxed);
+            if transaction.matches_previous(tail_cache) {
+                let new_tail = self.reload_tail_single(wrap_valid_tag);
+                if transaction.matches_previous(new_tail) {
                     return Err(val);
                 }
             }
-            let (chead, wrap_valid_tag) = transaction.get();
-            let write_cell = &mut *self.data.offset(chead);
             ptr::write(&mut write_cell.val, val);
             write_cell.wraps.store(wrap_valid_tag, Release);
             transaction.commit_direct(1, Relaxed);
@@ -171,12 +174,11 @@ impl<T> MultiQueue<T> {
         }
     }
 
-    fn reload_tail_multi(&self, tail_cache: usize) -> usize {
+    fn reload_tail_multi(&self, count: usize, tail_cache: usize) -> usize {
         // This shows how far behind from head the reader is
-        let chead = self.head.load_count(Relaxed);
-        if let Some(max_diff_from_head) = self.tail.get_max_diff(chead) {
-            let current_tail = CountedIndex::get_previous(chead, max_diff_from_head);
-            match self.tail_cache.compare_exchange(tail_cache, current_tail, Relaxed, Acquire) {
+        if let Some(max_diff_from_head) = self.tail.get_max_diff(count) {
+            let current_tail = CountedIndex::get_previous(count, max_diff_from_head);
+            match self.tail_cache.compare_exchange(tail_cache, current_tail, AcqRel, Relaxed) {
                 Ok(val) => val,
                 Err(val) => val,
             }
@@ -185,24 +187,18 @@ impl<T> MultiQueue<T> {
         }
     }
 
-    fn reload_tail_single(&self) -> usize {
-        let chead = self.head.load_count(Relaxed);
-        if let Some(max_diff_from_head) = self.tail.get_max_diff(chead) {
-            let current_tail = CountedIndex::get_previous(chead, max_diff_from_head);
-            self.tail_cache.store(current_tail, Relaxed);
-            current_tail
-        } else {
-            // If this assert fires, memory has been corrupted
-            assert!(false,
-                    "The write head got ran over by consumers in single writer mode. This \
+    fn reload_tail_single(&self, count: usize) -> usize {
+        let max_diff_from_head = self.tail
+            .get_max_diff(count)
+            .expect("The write head got ran over by consumers in single writer mode. This \
                      process is borked!");
-            0
-        }
+        let current_tail = CountedIndex::get_previous(count, max_diff_from_head);
+        self.tail_cache.store(current_tail, Relaxed);
+        current_tail
     }
 }
 
 impl<T> MultiWriter<T> {
-
     #[inline(always)]
     pub fn push(&self, val: T) -> Result<(), T> {
         match self.state.get() {
@@ -221,7 +217,6 @@ impl<T> MultiWriter<T> {
 }
 
 impl<T> MultiReader<T> {
-
     #[inline(always)]
     pub fn pop(&self) -> Option<T> {
         unsafe { self.queue.pop(&*self.reader.load(Relaxed)) }
@@ -311,7 +306,7 @@ mod test {
         }
     }
 
-    fn spsc_broadcast(senders: usize, receivers: usize) {
+    fn spsc_broadcast(receivers: usize) {
         let (writer, reader) = MultiQueue::<usize>::new(10);
         let myb = Barrier::new(receivers + 1);
         let bref = &myb;

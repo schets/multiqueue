@@ -86,7 +86,7 @@ impl CountedIndex {
 }
 
 impl<'a> Transaction<'a> {
-    /// Loads the index and the expected valid flag
+    /// Loads the index and the expected valid flag, equal to the operation count
     #[inline(always)]
     pub fn get(&self) -> (isize, usize) {
         ((self.loaded_vals & self.mask) as isize, self.loaded_vals)

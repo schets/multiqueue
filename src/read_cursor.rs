@@ -218,7 +218,10 @@ impl ReadCursor {
                         fence(Ordering::SeqCst);
                         return new_reader;
                     }
-                    Err(val) => current_ptr = val,
+                    Err(val) => {
+                        current_ptr = val;
+                        alloc::deallocate(new_group, 1);
+                    }
                 }
             }
         }
