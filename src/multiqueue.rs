@@ -312,12 +312,11 @@ mod test {
         let bref = &myb;
         let num_loop = 1000000;
         scope(|scope| {
-            let cur_writer = writer.clone();
             scope.spawn(move || {
                 bref.wait();
                 for i in 0..num_loop {
                     loop {
-                        if cur_writer.push(i).is_ok() {
+                        if writer.push(i).is_ok() {
                             break;
                         }
                     }
