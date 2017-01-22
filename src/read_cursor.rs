@@ -98,8 +98,10 @@ impl Reader {
 
     pub fn remove_consumer(&self) -> usize {
         self.num_consumers.fetch_sub(1, Ordering::SeqCst)
+    }
 
-        // Code to drop receiver for real here if is needed
+    pub fn get_consumers(&self) -> usize {
+        self.num_consumers.load(Ordering::Relaxed)
     }
 }
 

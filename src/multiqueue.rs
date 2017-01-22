@@ -235,6 +235,31 @@ impl<T> MultiReader<T> {
             reader: unsafe { self.queue.tail.add_reader(&*self.reader.load(Relaxed)) },
         }
     }
+
+    /// Removes the given reader from the queue subscription lib
+    /// Returns true if this is the last reader in a given broadcast unit
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// let (writer, reader) = multiqueue(1);
+    /// let reader_2_1 = reader.add_reader();
+    /// let reader_2_2 = reader_2_1.clone();
+    /// writer.push(1).expect("This will succeed since queue is empty");
+    /// reader.pop().expect("This reader can read");
+    /// assert!(writer.push(1).is_err(), "This fails since the reader2 group hasn't advanced");
+    /// assert!(!reader_2_2.unsubscribe(), "This returns false since reader_2_1 is still alive");
+    /// assert!(reader_2_1.unsubscribe(),
+    ///         "This returns true since there are no readers alive in the reader_2_x group");
+    /// writer.push(1).expect("This succeeds since ");
+    /// ```
+    pub fn unsubscribe(self) -> bool {
+        unsafe {
+            let reader = &*self.reader.load(Relaxed);
+            reader.get_consumers() == 1
+        }
+    }
 }
 
 impl<T> Clone for MultiWriter<T> {
@@ -343,7 +368,7 @@ mod test {
             {
                 let _ = writer;
             }; // Dump writer so we don't waste too much time on it
-            for _ in 0..(receivers - 1) {
+            for _ in 0..receivers {
                 let this_reader = reader.add_reader();
                 scope.spawn(move || {
                     let mut myv = Vec::new();
@@ -361,26 +386,13 @@ mod test {
                             yield_now();
                         }
                     }
+                    assert!(this_reader.pop().is_none());
                 });
             }
-            let mut myv = Vec::new();
-            for _ in 0..senders {
-                myv.push(0);
-            }
-            bref.wait();
-            'outer: for i in 0..num_loop * senders {
-                for _ in 0..100000000 {
-                    if let Some(val) = reader.pop() {
-                        assert_eq!(myv[val.0], val.1);
-                        myv[val.0] += 1;
-                        continue 'outer;
-                    }
-                    yield_now();
-                }
-                assert!(false, "Reader could not read");
+            {
+                let todie = reader;
             }
         });
-        assert!(reader.pop().is_none());
     }
 
     #[test]
@@ -446,9 +458,9 @@ mod test {
                 });
             }
             {
-                let _ = writer;
+                let todie = writer;
             }; // Dump writer so we don't waste too much time on it
-            for _ in 0..(receivers - 1) {
+            for _ in 0..receivers {
                 let this_reader = reader.add_reader();
                 scope.spawn(move || {
                     let mut myv = Vec::new();
@@ -466,26 +478,13 @@ mod test {
                             yield_now();
                         }
                     }
+                    assert!(this_reader.pop().is_none());
                 });
             }
-            let mut myv = Vec::new();
-            for _ in 0..senders {
-                myv.push(0);
-            }
-            bref.wait();
-            'outer: for i in 0..num_loop * senders {
-                for _ in 0..100000000 {
-                    if let Some(val) = reader.pop() {
-                        assert_eq!(myv[val.0], val.1);
-                        myv[val.0] += 1;
-                        continue 'outer;
-                    }
-                    yield_now();
-                }
-                assert!(false, "Reader could not read");
+            {
+                let todie = reader;
             }
         });
-        assert!(reader.pop().is_none());
     }
 
 
