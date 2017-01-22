@@ -1,4 +1,4 @@
-/*extern crate crossbeam;
+extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
@@ -85,4 +85,3 @@ fn main() {
         recv(bref, reader);
     });
 }
-*/

@@ -1,4 +1,4 @@
-/*extern crate crossbeam;
+extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
@@ -59,4 +59,3 @@ fn main() {
         println!("Time spent doing {} push/pop pairs (without waiting on the popped result!) was {} ns per item", num_do, ns_per_item);
     });
 }
-*/

@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::mem;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
 
@@ -31,8 +32,7 @@ struct ReadAttempt<'a> {
 /// This holds the set of readers currently active.
 /// This struct is held out of line from the cursor so it's easy to atomically replace it
 struct ReaderGroup {
-    readers: *const *const Reader,
-    n_readers: usize,
+    readers: Vec<*const Reader>,
 }
 
 #[repr(C)]
@@ -96,8 +96,8 @@ impl Reader {
         self.num_consumers.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub fn remove_consumer(&self) {
-        self.num_consumers.fetch_sub(1, Ordering::SeqCst);
+    pub fn remove_consumer(&self) -> usize {
+        self.num_consumers.fetch_sub(1, Ordering::SeqCst)
 
         // Code to drop receiver for real here if is needed
     }
@@ -105,20 +105,12 @@ impl Reader {
 
 impl ReaderGroup {
     pub fn new() -> ReaderGroup {
-        ReaderGroup {
-            readers: ptr::null(),
-            n_readers: 0,
-        }
+        ReaderGroup { readers: Vec::new() }
     }
 
     /// Only safe to call from a consumer of the queue!
-    pub unsafe fn add_reader(&self,
-                             raw: usize,
-                             wrap: u32)
-                             -> (*mut ReaderGroup, AtomicPtr<Reader>) {
-        let next_readers = self.n_readers + 1;
+    pub unsafe fn add_reader(&self, raw: usize, wrap: u32) -> (*mut ReaderGroup, *mut Reader) {
         let new_reader = alloc::allocate(1);
-        let new_readers = alloc::allocate(next_readers);
         let new_group = alloc::allocate(1);
         ptr::write(new_reader,
                    Reader {
@@ -126,26 +118,28 @@ impl ReaderGroup {
                        state: Cell::new(ReaderState::Single),
                        num_consumers: AtomicUsize::new(1),
                    });
-        for i in 0..self.n_readers as isize {
-            *new_readers.offset(i) = *self.readers.offset(i);
-        }
-        *new_readers.offset((next_readers - 1) as isize) = new_reader;
-        ptr::write(new_group,
-                   ReaderGroup {
-                       readers: new_readers as *const *const Reader,
-                       n_readers: next_readers,
-                   });
-        (new_group, AtomicPtr::new(new_reader))
+        let mut new_readers = self.readers.clone();
+        new_readers.push(new_reader as *const Reader);
+        ptr::write(new_group, ReaderGroup { readers: new_readers });
+        (new_group, new_reader)
+    }
+
+    pub unsafe fn remove_reader(&self, reader: *const Reader) -> *mut ReaderGroup {
+        let new_group = alloc::allocate(1);
+        let mut new_readers = self.readers.clone();
+        new_readers.retain(|pt| *pt != reader);
+        ptr::write(new_group, ReaderGroup { readers: new_readers });
+        new_group
     }
 
     pub fn get_max_diff(&self, cur_writer: usize) -> Option<u32> {
         let mut max_diff: usize = 0;
         unsafe {
-            for i in 0..self.n_readers as isize {
+            for reader_ptr in &self.readers {
                 // If a reader has passed the writer during this function call
                 // then what must have happened is that somebody else has completed this
                 // written to the queue, and a reader has bypassed it. We should retry
-                let rpos = (**self.readers.offset(i)).pos_data.load_count(MAYBE_ACQUIRE);
+                let rpos = (**reader_ptr).pos_data.load_count(MAYBE_ACQUIRE);
                 let diff = cur_writer.wrapping_sub(rpos);
                 if diff > (1 << 30) {
                     return None;
@@ -165,7 +159,7 @@ impl ReadCursor {
         let rg = ReaderGroup::new();
         unsafe {
             let (real_group, reader) = rg.add_reader(0, wrap);
-            (ReadCursor { readers: AtomicPtr::new(real_group) }, reader)
+            (ReadCursor { readers: AtomicPtr::new(real_group) }, AtomicPtr::new(reader))
         }
     }
 
@@ -173,7 +167,8 @@ impl ReadCursor {
     pub fn prefetch_metadata(&self) {
         unsafe {
             let rg = &*self.readers.load(Consume);
-            ptr::read_volatile(&rg.n_readers);
+            let dummy_ptr: *const usize = mem::transmute(&rg.readers);
+            ptr::read_volatile(dummy_ptr);
         }
     }
 
@@ -201,10 +196,10 @@ impl ReadCursor {
         }
     }
 
+    // There's no fundamental reason these need to leak,
+    // I just haven't implemented the memory management yet.
+    // It's not too hard since we can track readers and writers active
     pub fn add_reader(&self, reader: &Reader) -> AtomicPtr<Reader> {
-        // There's no fundamental reason this needs to leak,
-        // I just haven't implemented the memory management yet.
-        // It's not too hard since we can track readers and writers active
         let mut current_ptr = self.readers.load(Consume);
         loop {
             unsafe {
@@ -216,10 +211,34 @@ impl ReadCursor {
                     .compare_exchange(current_ptr, new_group, Ordering::SeqCst, Ordering::SeqCst) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
-                        return new_reader;
+                        return AtomicPtr::new(new_reader);
                     }
                     Err(val) => {
                         current_ptr = val;
+                        alloc::deallocate(new_group, 1);
+                        alloc::deallocate(new_reader, 1);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn remove_reader(&self, reader: &Reader) {
+        let mut current_group = self.readers.load(Consume);
+        loop {
+            unsafe {
+                let new_group = (*current_group).remove_reader(reader);
+                match self.readers
+                    .compare_exchange(current_group,
+                                      new_group,
+                                      Ordering::SeqCst,
+                                      Ordering::SeqCst) {
+                    Ok(_) => {
+                        fence(Ordering::SeqCst);
+                        break;
+                    }
+                    Err(val) => {
+                        current_group = val;
                         alloc::deallocate(new_group, 1);
                     }
                 }

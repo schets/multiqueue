@@ -110,14 +110,18 @@ impl<T> MultiQueue<T> {
         self.tail.prefetch_metadata();
         unsafe {
             loop {
-                let tail_cache = self.tail_cache.load(Acquire);
                 let (chead, wrap_valid_tag) = transaction.get();
                 let write_cell = &mut *self.data.offset(chead);
+                let tail_cache = self.tail_cache.load(Relaxed);
                 if transaction.matches_previous(tail_cache) {
                     let new_tail = self.reload_tail_multi(tail_cache, wrap_valid_tag);
                     if transaction.matches_previous(new_tail) {
                         return Err(val);
                     }
+                } else {
+                    // In the other case, there's already an acquire load for tail_cache.
+                    // This speeds up the full queue case for arm
+                    maybe_acquire_fence();
                 }
                 // This isize conversion is valid since indices are 30 bits
                 match transaction.commit(1, Relaxed) {
@@ -150,9 +154,6 @@ impl<T> MultiQueue<T> {
             transaction.commit_direct(1, Relaxed);
             Ok(())
         }
-
-        // Might consider letting the queue update the tail cache here preemptively
-        // so it doesn't waste time before sending a message to do so
     }
 
     pub fn pop(&self, reader: &Reader) -> Option<T> {
@@ -167,7 +168,10 @@ impl<T> MultiQueue<T> {
                 maybe_acquire_fence();
                 let rval = ptr::read(&read_cell.val);
                 match ctail_attempt.commit_attempt(1, Release) {
-                    Some(new_attempt) => ctail_attempt = new_attempt,
+                    Some(new_attempt) => {
+                        ctail_attempt = new_attempt;
+                        mem::forget(rval);
+                    }
                     None => return Some(rval),
                 }
             }
@@ -175,7 +179,6 @@ impl<T> MultiQueue<T> {
     }
 
     fn reload_tail_multi(&self, tail_cache: usize, count: usize) -> usize {
-        // This shows how far behind from head the reader is
         if let Some(max_diff_from_head) = self.tail.get_max_diff(count) {
             let current_tail = CountedIndex::get_previous(count, max_diff_from_head);
             if tail_cache == current_tail {
@@ -268,7 +271,12 @@ impl<T> Drop for MultiWriter<T> {
 
 impl<T> Drop for MultiReader<T> {
     fn drop(&mut self) {
-        unsafe { (*self.reader.load(Relaxed)).remove_consumer() }
+        unsafe {
+            let reader = &*self.reader.load(Relaxed);
+            if reader.remove_consumer() == 1 {
+                self.queue.tail.remove_reader(reader);
+            }
+        }
     }
 }
 
@@ -394,5 +402,92 @@ mod test {
     fn test_mpsc_broadcast() {
         mpsc_broadcast(2, 3);
     }
+
+    #[test]
+    fn test_remove_reader() {
+        let (writer, reader) = MultiQueue::<usize>::new(1);
+        assert!(writer.push(1).is_ok());
+        let reader_2 = reader.add_reader();
+        assert!(writer.push(1).is_err());
+        assert_eq!(1, reader.pop().unwrap());
+        assert!(reader.pop().is_none());
+        assert_eq!(1, reader_2.pop().unwrap());
+        assert!(reader_2.pop().is_none());
+        assert!(writer.push(1).is_ok());
+        assert!(writer.push(1).is_err());
+        assert_eq!(1, reader.pop().unwrap());
+        assert!(reader.pop().is_none());
+        {
+            let to_die = reader_2;
+        }
+        assert!(writer.push(2).is_ok());
+        assert_eq!(2, reader.pop().unwrap());
+    }
+
+    fn mpmc_broadcast(senders: usize, receivers: usize) {
+        let (writer, reader) = MultiQueue::<(usize, usize)>::new(10);
+        let myb = Barrier::new(receivers + senders);
+        let bref = &myb;
+        let num_loop = 100000;
+        scope(|scope| {
+            for q in 0..senders {
+                let cur_writer = writer.clone();
+                scope.spawn(move || {
+                    bref.wait();
+                    'outer: for i in 0..num_loop {
+                        for j in 0..100000000 {
+                            if cur_writer.push((q, i)).is_ok() {
+                                continue 'outer;
+                            }
+                            yield_now();
+                        }
+                        assert!(false, "Writer could not write");
+                    }
+                });
+            }
+            {
+                let _ = writer;
+            }; // Dump writer so we don't waste too much time on it
+            for _ in 0..(receivers - 1) {
+                let this_reader = reader.add_reader();
+                scope.spawn(move || {
+                    let mut myv = Vec::new();
+                    for _ in 0..senders {
+                        myv.push(0);
+                    }
+                    bref.wait();
+                    for _ in 0..num_loop * senders {
+                        loop {
+                            if let Some(val) = this_reader.pop() {
+                                assert_eq!(myv[val.0], val.1);
+                                myv[val.0] += 1;
+                                break;
+                            }
+                            yield_now();
+                        }
+                    }
+                });
+            }
+            let mut myv = Vec::new();
+            for _ in 0..senders {
+                myv.push(0);
+            }
+            bref.wait();
+            'outer: for i in 0..num_loop * senders {
+                for _ in 0..100000000 {
+                    if let Some(val) = reader.pop() {
+                        assert_eq!(myv[val.0], val.1);
+                        myv[val.0] += 1;
+                        continue 'outer;
+                    }
+                    yield_now();
+                }
+                assert!(false, "Reader could not read");
+            }
+        });
+        assert!(reader.pop().is_none());
+    }
+
+
 
 }
