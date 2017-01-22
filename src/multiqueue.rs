@@ -324,6 +324,7 @@ mod test {
     use self::crossbeam::scope;
 
     use std::sync::atomic::Ordering::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::yield_now;
 
     use std::sync::Barrier;
@@ -389,9 +390,7 @@ mod test {
                     assert!(this_reader.pop().is_none());
                 });
             }
-            {
-                let todie = reader;
-            }
+            reader.unsubscribe();
         });
     }
 
@@ -436,19 +435,22 @@ mod test {
         assert_eq!(2, reader.pop().unwrap());
     }
 
-    fn mpmc_broadcast(senders: usize, receivers: usize) {
-        let (writer, reader) = MultiQueue::<(usize, usize)>::new(10);
-        let myb = Barrier::new(receivers + senders);
+    fn mpmc_broadcast(senders: usize, receivers: usize, nclone: usize) {
+        let (writer, reader) = MultiQueue::<usize>::new(10);
+        let myb = Barrier::new((receivers * nclone) + senders);
         let bref = &myb;
         let num_loop = 100000;
+        let counter = AtomicUsize::new(0);
+        let cref = &counter;
         scope(|scope| {
             for q in 0..senders {
                 let cur_writer = writer.clone();
                 scope.spawn(move || {
                     bref.wait();
+                    println!("Writer started!");
                     'outer: for i in 0..num_loop {
                         for j in 0..100000000 {
-                            if cur_writer.push((q, i)).is_ok() {
+                            if cur_writer.push(1).is_ok() {
                                 continue 'outer;
                             }
                             yield_now();
@@ -461,32 +463,42 @@ mod test {
                 let todie = writer;
             }; // Dump writer so we don't waste too much time on it
             for _ in 0..receivers {
-                let this_reader = reader.add_reader();
-                scope.spawn(move || {
-                    let mut myv = Vec::new();
-                    for _ in 0..senders {
-                        myv.push(0);
-                    }
-                    bref.wait();
-                    for _ in 0..num_loop * senders {
-                        loop {
-                            if let Some(val) = this_reader.pop() {
-                                assert_eq!(myv[val.0], val.1);
-                                myv[val.0] += 1;
-                                break;
-                            }
-                            yield_now();
+                let _this_reader = reader.add_reader();
+                for _ in 0..nclone {
+                    let this_reader = _this_reader.clone();
+                    scope.spawn(move || {
+                        let mut myv = Vec::new();
+                        for _ in 0..senders {
+                            myv.push(0);
                         }
-                    }
-                    assert!(this_reader.pop().is_none());
-                });
+                        bref.wait();
+                        println!("Reader started!");
+                        for _ in 0..num_loop * senders {
+                            loop {
+                                if let Some(val) = this_reader.pop() {
+                                    cref.fetch_add(1, Ordering::Relaxed);
+                                    break
+                                }
+                                yield_now();
+                            }
+                        }
+                        assert!(this_reader.pop().is_none());
+                    });
+                }
             }
-            {
-                let todie = reader;
-            }
+            reader.unsubscribe();
         });
+        assert_eq!((senders + receivers)*num_loop, counter.load(Ordering::SeqCst));
     }
 
+    #[test]
+    fn test_spmc() {
+        mpmc_broadcast(1, 1, 2);
+    }
 
+    #[test]
+    fn test_spmc_broadcast() {
+    //    mpmc_broadcast(1, 2, 2);
+    }
 
 }
