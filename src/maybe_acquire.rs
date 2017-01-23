@@ -8,7 +8,7 @@ mod theimpl {
 
     #[inline(always)]
     pub fn maybe_acquire_fence() {
-        fence(Ordering: Acquire)
+        fence(Ordering::Acquire)
     }
 }
 
