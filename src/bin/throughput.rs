@@ -46,7 +46,7 @@ fn Send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize) {
 }
 
 fn main() {
-    let num_do = 100000;
+    let num_do = 10000000;
     let (writer, reader) = multiqueue(20000);
     let bar = Barrier::new(2);
     let bref = &bar;
