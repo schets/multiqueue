@@ -123,7 +123,6 @@ impl<T> MultiQueue<T> {
                     // This speeds up the full queue case for arm
                     maybe_acquire_fence();
                 }
-                // This isize conversion is valid since indices are 30 bits
                 match transaction.commit(1, Relaxed) {
                     Some(new_transaction) => transaction = new_transaction,
                     None => {
@@ -150,8 +149,8 @@ impl<T> MultiQueue<T> {
                 }
             }
             ptr::write(&mut write_cell.val, val);
-            write_cell.wraps.store(wrap_valid_tag, Release);
             transaction.commit_direct(1, Relaxed);
+            write_cell.wraps.store(wrap_valid_tag, Release);
             Ok(())
         }
     }
@@ -329,6 +328,15 @@ mod test {
 
     use std::sync::Barrier;
 
+    fn force_push<T>(w: &MultiWriter<T>, mut val: T) {
+        loop {
+            match w.push(val) {
+                Ok(_) => break,
+                Err(nv) => val = nv,
+            }
+        }
+    }
+
     #[test]
     fn build_queue() {
         let _ = MultiQueue::<usize>::new(10);
@@ -395,7 +403,7 @@ mod test {
     }
 
     #[test]
-    fn test_spsc() {
+    fn test_spsc_this() {
         mpsc_broadcast(1, 1);
     }
 
@@ -441,13 +449,14 @@ mod test {
         let bref = &myb;
         let num_loop = 100000;
         let counter = AtomicUsize::new(0);
+        let writers_active = AtomicUsize::new(senders);
+        let waref = &writers_active;
         let cref = &counter;
         scope(|scope| {
             for q in 0..senders {
                 let cur_writer = writer.clone();
                 scope.spawn(move || {
                     bref.wait();
-                    println!("Writer started!");
                     'outer: for i in 0..num_loop {
                         for j in 0..100000000 {
                             if cur_writer.push(1).is_ok() {
@@ -455,13 +464,12 @@ mod test {
                             }
                             yield_now();
                         }
+                        waref.fetch_sub(1, Relaxed);
                         assert!(false, "Writer could not write");
                     }
+                    waref.fetch_sub(1, Release);
                 });
             }
-            {
-                let todie = writer;
-            }; // Dump writer so we don't waste too much time on it
             for _ in 0..receivers {
                 let _this_reader = reader.add_reader();
                 for _ in 0..nclone {
@@ -472,23 +480,24 @@ mod test {
                             myv.push(0);
                         }
                         bref.wait();
-                        println!("Reader started!");
-                        for _ in 0..num_loop * senders {
-                            loop {
-                                if let Some(val) = this_reader.pop() {
-                                    cref.fetch_add(1, Ordering::Relaxed);
-                                    break
+                        loop {
+                            if let Some(val) = this_reader.pop() {
+                                cref.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                let writers = waref.load(Ordering::Acquire);
+                                if writers == 0 {
+                                    break;
                                 }
-                                yield_now();
                             }
+                            yield_now();
                         }
-                        assert!(this_reader.pop().is_none());
                     });
                 }
             }
             reader.unsubscribe();
         });
-        assert_eq!((senders + receivers)*num_loop, counter.load(Ordering::SeqCst));
+        assert_eq!(senders * receivers * num_loop,
+                   counter.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -498,7 +507,17 @@ mod test {
 
     #[test]
     fn test_spmc_broadcast() {
-    //    mpmc_broadcast(1, 2, 2);
+        mpmc_broadcast(1, 2, 2);
+    }
+
+    #[test]
+    fn test_mpmc() {
+        mpmc_broadcast(2, 1, 2);
+    }
+
+    #[test]
+    fn test_mpmc_broadcast() {
+        mpmc_broadcast(2, 2, 2);
     }
 
 }
