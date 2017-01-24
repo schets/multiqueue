@@ -1,5 +1,6 @@
 
 mod alloc;
+mod atomicsignal;
 mod consume;
 mod countedindex;
 mod maybe_acquire;

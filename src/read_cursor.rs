@@ -4,9 +4,11 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
 
 use alloc;
-use consume::Consume;
+use atomicsignal::AtomicSignal;
+use consume::CONSUME;
 use countedindex::{CountedIndex, Transaction};
 use maybe_acquire::{MAYBE_ACQUIRE, maybe_acquire_fence};
+use memory::MemoryManager;
 
 #[derive(Clone, Copy)]
 enum ReaderState {
@@ -168,7 +170,7 @@ impl ReadCursor {
     #[inline(always)]
     pub fn prefetch_metadata(&self) {
         unsafe {
-            let rg = &*self.readers.load(Consume);
+            let rg = &*self.readers.load(CONSUME);
             let dummy_ptr: *const usize = mem::transmute(&rg.readers);
             ptr::read_volatile(dummy_ptr);
         }
@@ -177,7 +179,7 @@ impl ReadCursor {
     pub fn get_max_diff(&self, cur_writer: usize) -> Option<u32> {
         loop {
             unsafe {
-                let first_ptr = self.readers.load(Consume);
+                let first_ptr = self.readers.load(CONSUME);
                 let rg = &*first_ptr;
                 let rval = rg.get_max_diff(cur_writer);
                 // This check ensures that the pointer hasn't changed
@@ -201,8 +203,8 @@ impl ReadCursor {
     // There's no fundamental reason these need to leak,
     // I just haven't implemented the memory management yet.
     // It's not too hard since we can track readers and writers active
-    pub fn add_reader(&self, reader: &Reader) -> AtomicPtr<Reader> {
-        let mut current_ptr = self.readers.load(Consume);
+    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> AtomicPtr<Reader> {
+        let mut current_ptr = self.readers.load(CONSUME);
         loop {
             unsafe {
                 let current_group = &*current_ptr;
@@ -213,10 +215,12 @@ impl ReadCursor {
                     .compare_exchange(current_ptr, new_group, Ordering::SeqCst, Ordering::SeqCst) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
+                        manager.free(current_ptr, 1);
                         return AtomicPtr::new(new_reader);
                     }
                     Err(val) => {
                         current_ptr = val;
+                        ptr::read(new_group);
                         alloc::deallocate(new_group, 1);
                         alloc::deallocate(new_reader, 1);
                     }
@@ -225,8 +229,8 @@ impl ReadCursor {
         }
     }
 
-    pub fn remove_reader(&self, reader: &Reader) {
-        let mut current_group = self.readers.load(Consume);
+    pub fn remove_reader(&self, reader: &Reader, mem: &MemoryManager) {
+        let mut current_group = self.readers.load(CONSUME);
         loop {
             unsafe {
                 let new_group = (*current_group).remove_reader(reader);
@@ -237,10 +241,12 @@ impl ReadCursor {
                                       Ordering::SeqCst) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
+                        mem.free(current_group, 1);
                         break;
                     }
                     Err(val) => {
                         current_group = val;
+                        ptr::read(new_group);
                         alloc::deallocate(new_group, 1);
                     }
                 }

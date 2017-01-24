@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
 use alloc;
 use countedindex::{CountedIndex, get_valid_wrap, INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
+use memory::MemoryManager;
 
 use read_cursor::{ReadCursor, Reader};
 
@@ -44,6 +45,9 @@ struct MultiQueue<T> {
     data: *mut QueueEntry<T>,
     capacity: isize,
     d3: [u8; 64],
+
+    manager: MemoryManager,
+    d4: [u8; 64],
 }
 
 pub struct MultiWriter<T> {
@@ -82,6 +86,10 @@ impl<T> MultiQueue<T> {
             capacity: capacity as isize,
 
             d3: unsafe { mem::uninitialized() },
+
+            manager: MemoryManager::new(),
+
+            d4: unsafe { mem::uninitialized() },
         };
 
         let qarc = Arc::new(queue);
@@ -231,7 +239,9 @@ impl<T> MultiReader<T> {
     pub fn add_reader(&self) -> MultiReader<T> {
         MultiReader {
             queue: self.queue.clone(),
-            reader: unsafe { self.queue.tail.add_reader(&*self.reader.load(Relaxed)) },
+            reader: unsafe {
+                self.queue.tail.add_reader(&*self.reader.load(Relaxed), &self.queue.manager)
+            },
         }
     }
 
@@ -298,7 +308,7 @@ impl<T> Drop for MultiReader<T> {
         unsafe {
             let reader = &*self.reader.load(Relaxed);
             if reader.remove_consumer() == 1 {
-                self.queue.tail.remove_reader(reader);
+                self.queue.tail.remove_reader(reader, &self.queue.manager);
             }
         }
     }

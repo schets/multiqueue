@@ -30,7 +30,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
         let end = precise_time_ns();
         if end >= start {
             succ += 1;
-            total_time += (end - start);
+            total_time += end - start;
         }
     }
     let to_subtract = total_time / succ;
@@ -57,7 +57,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
     }
 }
 
-fn Send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize, num_us: usize) {
+fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize, num_us: usize) {
     bar.wait();
     let val: AtomicUsize = AtomicUsize::new(0);
     for _ in 0..num_push {
@@ -71,7 +71,7 @@ fn Send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize, num_us
             waste_50_ns(&val);
         }
     }
-    writer.push(None);
+    while let Err(_) = writer.push(None) {};
 }
 
 fn main() {
@@ -80,7 +80,7 @@ fn main() {
     let bref = &bar;
     scope(|scope| {
         scope.spawn(move || {
-            Send(bref, writer, 100000, 40);
+            send(bref, writer, 100000, 40);
         });
         recv(bref, reader);
     });

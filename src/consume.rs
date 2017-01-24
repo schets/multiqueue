@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
           target_arch = "arm"))]
 mod CanConsume {
     use std::sync::atomic::Ordering;
-    pub const Consume: Ordering = Ordering::Relaxed;
+    pub const CONSUME: Ordering = Ordering::Relaxed;
 }
 
 #[cfg(not(any(target_arch = "x64",
@@ -19,7 +19,7 @@ mod CanConsume {
               target_arch = "arm")))]
 mod CanConsume {
     use std::sync::atomic::Ordering;
-    pub const Consume: Ordering = Ordering::Acquire;
+    pub const CONSUME: Ordering = Ordering::Acquire;
 }
 
-pub const Consume: Ordering = CanConsume::Consume;
+pub const CONSUME: Ordering = CanConsume::CONSUME;

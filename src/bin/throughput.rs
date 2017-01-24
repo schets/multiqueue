@@ -8,7 +8,6 @@ use time::precise_time_ns;
 
 use crossbeam::scope;
 
-use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::sync::Barrier;
 
 fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) -> u64 {
@@ -20,7 +19,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) -> u64 {
             match popped {
                 None => break,
                 Some(pushed) => {
-                    if (cur != pushed) {
+                    if cur != pushed {
                         panic!("Dang");
                     }
                     cur += 1;
@@ -32,7 +31,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) -> u64 {
     precise_time_ns() - start
 }
 
-fn Send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize) {
+fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize) {
     bar.wait();
     for i in 0..num_push as u64 {
         loop {
@@ -42,7 +41,7 @@ fn Send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize) {
             }
         }
     }
-    writer.push(None);
+    while let Err(_) = writer.push(None) {}
 }
 
 fn main() {
@@ -52,7 +51,7 @@ fn main() {
     let bref = &bar;
     scope(|scope| {
         scope.spawn(move || {
-            Send(bref, writer, num_do);
+            send(bref, writer, num_do);
         });
         let ns_spent = recv(bref, reader) as f64;
         let ns_per_item = ns_spent / (num_do as f64);
