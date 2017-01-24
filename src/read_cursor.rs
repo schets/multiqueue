@@ -4,7 +4,6 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
 
 use alloc;
-use atomicsignal::AtomicSignal;
 use consume::CONSUME;
 use countedindex::{CountedIndex, Transaction};
 use maybe_acquire::{MAYBE_ACQUIRE, maybe_acquire_fence};
@@ -88,14 +87,10 @@ impl Reader {
         }
     }
 
-    #[inline(always)]
-    pub fn load_nread(&self, ord: Ordering) -> usize {
-        self.pos_data.load_count(ord)
-    }
-
     pub fn dup_consumer(&self) {
-        self.state.set(ReaderState::Multi);
-        self.num_consumers.fetch_add(1, Ordering::SeqCst);
+        if self.num_consumers.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.state.set(ReaderState::Multi);
+        }
     }
 
     pub fn remove_consumer(&self) -> usize {

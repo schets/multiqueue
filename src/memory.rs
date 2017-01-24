@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::mem;
+use std::ptr;
 use std::sync::{Mutex, TryLockError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -15,26 +16,29 @@ struct ToFree {
 
 /// This is a unique token representing a subscriber to the multiqueue
 pub struct MemToken {
-    token: u64,
     epoch: AtomicUsize,
 }
 
 struct MemoryManagerInner {
     tokens: Vec<*const MemToken>,
     tofree: Vec<ToFree>,
+    epoch: usize,
 }
 
 pub struct MemoryManager {
     mem_manager: Mutex<MemoryManagerInner>,
     wait_to_free: Mutex<Vec<ToFree>>,
     epoch: AtomicUsize,
-    signal: AtomicSignal,
+    pub signal: AtomicSignal,
 }
 
 impl ToFree {
     pub fn new<T>(val: *mut T, num: usize) -> ToFree {
         unsafe fn do_free<F>(pt: *mut u8, num: usize) {
             let to_free: *mut F = mem::transmute(pt);
+            for i in 0..num as isize {
+                ptr::read(to_free.offset(i));
+            }
             alloc::deallocate(to_free, num);
         }
         ToFree {
@@ -54,16 +58,21 @@ impl MemoryManagerInner {
         MemoryManagerInner {
             tokens: Vec::new(),
             tofree: Vec::new(),
+            epoch: 0,
         }
     }
 
-    pub fn free(&mut self, pt: *mut u8, num: usize, freer: fn(*mut u8, usize)) -> bool {
-        self.tofree.push(ToFree {
-            mem: pt,
-            num_param: num,
-            freer: freer,
-        });
-        self.tofree.len() > 10
+    pub fn get_token(&mut self, at: usize) -> *const MemToken {
+        let token = alloc::allocate(1);
+        self.tokens.push(token as *const MemToken);
+        unsafe {
+            ptr::write(token, MemToken { epoch: AtomicUsize::new(at) });
+        }
+        token as *const MemToken
+    }
+
+    pub fn remove_token(&mut self, token: *const MemToken) {
+        self.tokens.retain(|x| *x != token);
     }
 
     pub fn try_freeing(&mut self, at: usize) -> bool {
@@ -80,6 +89,7 @@ impl MemoryManagerInner {
         for val in self.tofree.drain(..) {
             val.delete();
         }
+        self.epoch = at;
         true
     }
 
@@ -96,6 +106,17 @@ impl MemoryManager {
             epoch: AtomicUsize::new(0),
             signal: AtomicSignal::new(),
         }
+    }
+
+    pub fn get_token(&self) -> *const MemToken {
+        let mut inner = self.mem_manager.lock().unwrap();
+        inner.get_token(self.epoch.load(Ordering::Acquire))
+    }
+
+    pub fn remove_token(&self, token: *const MemToken) {
+        let mut inner = self.mem_manager.lock().unwrap();
+        inner.remove_token(token);
+        self.free(token as *mut MemToken, 1);
     }
 
     pub fn start_free(&self) {
@@ -129,10 +150,13 @@ impl MemoryManager {
                 false
             }
             Ok(mut inner) => {
+                let cur_epoch = self.epoch.load(Ordering::Relaxed);
+                if inner.epoch != cur_epoch {
+                    return false;
+                }
                 let mut newv = Vec::new();
                 mem::swap(&mut newv, elemvec);
                 inner.add_freeable(newv);
-                let cur_epoch = self.epoch.load(Ordering::Relaxed);
                 self.epoch.store(cur_epoch.wrapping_add(1), Ordering::Relaxed);
                 self.signal.clear_start_free(Ordering::Relaxed);
                 self.signal.set_epoch(Ordering::Release);
@@ -147,6 +171,22 @@ impl MemoryManager {
         if elemvec.len() > 20 {
             if !self.do_start_free(&mut elemvec) {
                 self.signal.set_start_free(Ordering::Release);
+            }
+        }
+    }
+
+    pub fn update_token(&self, val: *const MemToken) {
+        unsafe {
+            let token = &*val;
+            let epoch = self.epoch.load(Ordering::Relaxed);
+            if token.epoch.load(Ordering::Relaxed) != epoch {
+                token.epoch.store(epoch, Ordering::Release);
+            }
+            match self.mem_manager.try_lock() {
+                Err(_) => (),
+                Ok(mut inner) => {
+                    inner.try_freeing(epoch);
+                }
             }
         }
     }

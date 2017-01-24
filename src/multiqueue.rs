@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, fence};
 use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
 
 use alloc;
+use atomicsignal::LoadedSignal;
 use countedindex::{CountedIndex, get_valid_wrap, INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
-use memory::MemoryManager;
+use memory::{MemoryManager, MemToken};
 
 use read_cursor::{ReadCursor, Reader};
 
@@ -53,11 +54,13 @@ struct MultiQueue<T> {
 pub struct MultiWriter<T> {
     queue: Arc<MultiQueue<T>>,
     state: Cell<QueueState>,
+    token: *const MemToken,
 }
 
 pub struct MultiReader<T> {
     queue: Arc<MultiQueue<T>>,
     reader: AtomicPtr<Reader>,
+    token: *const MemToken,
 }
 
 impl<T> MultiQueue<T> {
@@ -97,11 +100,13 @@ impl<T> MultiQueue<T> {
         let mwriter = MultiWriter {
             queue: qarc.clone(),
             state: Cell::new(QueueState::Single),
+            token: qarc.manager.get_token(),
         };
 
         let mreader = MultiReader {
-            queue: qarc,
+            queue: qarc.clone(),
             reader: reader,
+            token: qarc.manager.get_token(),
         };
 
         (mwriter, mreader)
@@ -215,6 +220,10 @@ impl<T> MultiQueue<T> {
 impl<T> MultiWriter<T> {
     #[inline(always)]
     pub fn push(&self, val: T) -> Result<(), T> {
+        let signal = self.queue.manager.signal.load(Relaxed);
+        if signal.has_action() {
+            self.handle_signals(signal);
+        }
         match self.state.get() {
             QueueState::Single => self.queue.push_single(val),
             QueueState::Multi => {
@@ -228,11 +237,24 @@ impl<T> MultiWriter<T> {
             }
         }
     }
+
+    #[cold]
+    fn handle_signals(&self, signal: LoadedSignal) {
+        if signal.get_epoch() {
+            self.queue.manager.update_token(self.token);
+        } else if signal.start_free() {
+            self.queue.manager.start_free();
+        }
+    }
 }
 
 impl<T> MultiReader<T> {
     #[inline(always)]
     pub fn pop(&self) -> Option<T> {
+        let signal = self.queue.manager.signal.load(Relaxed);
+        if signal.has_action() {
+            self.handle_signals(signal);
+        }
         unsafe { self.queue.pop(&*self.reader.load(Relaxed)) }
     }
 
@@ -242,8 +264,19 @@ impl<T> MultiReader<T> {
             reader: unsafe {
                 self.queue.tail.add_reader(&*self.reader.load(Relaxed), &self.queue.manager)
             },
+            token: self.queue.manager.get_token(),
         }
     }
+
+    #[cold]
+    fn handle_signals(&self, signal: LoadedSignal) {
+        if signal.get_epoch() {
+            self.queue.manager.update_token(self.token);
+        } else if signal.start_free() {
+            self.queue.manager.start_free();
+        }
+    }
+
 
     /// Removes the given reader from the queue subscription lib
     /// Returns true if this is the last reader in a given broadcast unit
@@ -277,6 +310,7 @@ impl<T> Clone for MultiWriter<T> {
         let rval = MultiWriter {
             queue: self.queue.clone(),
             state: Cell::new(QueueState::Multi),
+            token: self.queue.manager.get_token(),
         };
         self.queue.writers.fetch_add(1, Release);
         rval
@@ -289,6 +323,7 @@ impl<T> Clone for MultiReader<T> {
         let rval = MultiReader {
             queue: self.queue.clone(),
             reader: AtomicPtr::new(reader),
+            token: self.token,
         };
         unsafe {
             (*reader).dup_consumer();
@@ -300,6 +335,7 @@ impl<T> Clone for MultiReader<T> {
 impl<T> Drop for MultiWriter<T> {
     fn drop(&mut self) {
         self.queue.writers.fetch_sub(1, Release);
+        self.queue.manager.remove_token(self.token);
     }
 }
 
@@ -309,6 +345,7 @@ impl<T> Drop for MultiReader<T> {
             let reader = &*self.reader.load(Relaxed);
             if reader.remove_consumer() == 1 {
                 self.queue.tail.remove_reader(reader, &self.queue.manager);
+                self.queue.manager.remove_token(self.token);
             }
         }
     }
@@ -446,9 +483,7 @@ mod test {
         assert!(writer.push(1).is_err());
         assert_eq!(1, reader.pop().unwrap());
         assert!(reader.pop().is_none());
-        {
-            let to_die = reader_2;
-        }
+        reader_2.unsubscribe();
         assert!(writer.push(2).is_ok());
         assert_eq!(2, reader.pop().unwrap());
     }

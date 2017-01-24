@@ -64,19 +64,23 @@ impl AtomicSignal {
 }
 
 impl LoadedSignal {
-    pub fn get_epoch(&self, ord: Ordering) -> bool {
+    pub fn has_action(&self) -> bool {
+        self.flags != 0
+    }
+
+    pub fn get_epoch(&self) -> bool {
         (self.flags & UPDATE_EPOCH) != 0
     }
 
-    pub fn get_reader(&self, ord: Ordering) -> bool {
+    pub fn get_reader(&self) -> bool {
         (self.flags & NO_READER) != 0
     }
 
-    pub fn get_writer(&self, ord: Ordering) -> bool {
+    pub fn get_writer(&self) -> bool {
         (self.flags & NO_WRITER) != 0
     }
 
-    pub fn start_free(&self, ord: Ordering) -> bool {
+    pub fn start_free(&self) -> bool {
         (self.flags & START_FREE) != 0
     }
 }
