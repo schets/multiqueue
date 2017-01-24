@@ -114,11 +114,13 @@ impl MemoryManager {
     }
 
     pub fn remove_token(&self, token: *const MemToken) {
+        self.update_token(token);
         let mut inner = self.mem_manager.lock().unwrap();
         inner.remove_token(token);
         self.free(token as *mut MemToken, 1);
     }
 
+    #[cold]
     pub fn start_free(&self) {
         match self.wait_to_free.try_lock() {
             Err(val) => {
@@ -136,7 +138,6 @@ impl MemoryManager {
         }
     }
 
-    #[cold]
     fn do_start_free(&self, elemvec: &mut Vec<ToFree>) -> bool {
         match self.mem_manager.try_lock() {
             Err(val) => {
@@ -165,6 +166,7 @@ impl MemoryManager {
         }
     }
 
+    #[cold]
     pub fn free<T>(&self, pt: *mut T, num: usize) {
         let mut elemvec = self.wait_to_free.lock().unwrap();
         elemvec.push(ToFree::new(pt, num));
@@ -175,17 +177,23 @@ impl MemoryManager {
         }
     }
 
+    #[cold]
     pub fn update_token(&self, val: *const MemToken) {
         unsafe {
             let token = &*val;
             let epoch = self.epoch.load(Ordering::Relaxed);
-            if token.epoch.load(Ordering::Relaxed) != epoch {
-                token.epoch.store(epoch, Ordering::Release);
-            }
-            match self.mem_manager.try_lock() {
-                Err(_) => (),
-                Ok(mut inner) => {
-                    inner.try_freeing(epoch);
+            let token_e = token.epoch.load(Ordering::Relaxed);
+            if token_e != epoch {
+                let res = token.epoch.compare_and_swap(token_e, epoch, Ordering::Release);
+                if res == token_e {
+                    match self.mem_manager.try_lock() {
+                        Err(_) => (),
+                        Ok(mut inner) => {
+                            if inner.try_freeing(epoch) {
+                                self.signal.clear_epoch(Ordering::Release);
+                            }
+                        }
+                    }
                 }
             }
         }

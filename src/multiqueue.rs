@@ -238,7 +238,11 @@ impl<T> MultiWriter<T> {
         }
     }
 
+    /// Removes the writer as a producer to the queue
+    pub fn unsubscribe(self) {}
+
     #[cold]
+    #[inline(never)]
     fn handle_signals(&self, signal: LoadedSignal) {
         if signal.get_epoch() {
             self.queue.manager.update_token(self.token);
@@ -269,6 +273,7 @@ impl<T> MultiReader<T> {
     }
 
     #[cold]
+    #[inline(never)]
     fn handle_signals(&self, signal: LoadedSignal) {
         if signal.get_epoch() {
             self.queue.manager.update_token(self.token);
@@ -401,7 +406,7 @@ mod test {
     }
 
     fn mpsc_broadcast(senders: usize, receivers: usize) {
-        let (writer, reader) = MultiQueue::<(usize, usize)>::new(10);
+        let (writer, reader) = MultiQueue::<(usize, usize)>::new(4);
         let myb = Barrier::new(receivers + senders);
         let bref = &myb;
         let num_loop = 100000;
@@ -411,6 +416,7 @@ mod test {
                 scope.spawn(move || {
                     bref.wait();
                     'outer: for i in 0..num_loop {
+                        cur_writer.clone().unsubscribe();
                         for j in 0..100000000 {
                             if cur_writer.push((q, i)).is_ok() {
                                 continue 'outer;
@@ -421,9 +427,7 @@ mod test {
                     }
                 });
             }
-            {
-                let _ = writer;
-            }; // Dump writer so we don't waste too much time on it
+            writer.unsubscribe();
             for _ in 0..receivers {
                 let this_reader = reader.add_reader();
                 scope.spawn(move || {
@@ -432,7 +436,8 @@ mod test {
                         myv.push(0);
                     }
                     bref.wait();
-                    for _ in 0..num_loop * senders {
+                    for j in 0..num_loop * senders {
+                        this_reader.add_reader().unsubscribe();
                         loop {
                             if let Some(val) = this_reader.pop() {
                                 assert_eq!(myv[val.0], val.1);
@@ -515,6 +520,7 @@ mod test {
                     waref.fetch_sub(1, Release);
                 });
             }
+            writer.unsubscribe();
             for _ in 0..receivers {
                 let _this_reader = reader.add_reader();
                 for _ in 0..nclone {
