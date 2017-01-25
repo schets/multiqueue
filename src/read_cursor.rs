@@ -154,11 +154,11 @@ impl ReaderGroup {
 }
 
 impl ReadCursor {
-    pub fn new(wrap: u32) -> (ReadCursor, AtomicPtr<Reader>) {
+    pub fn new(wrap: u32) -> (ReadCursor, *const Reader) {
         let rg = ReaderGroup::new();
         unsafe {
             let (real_group, reader) = rg.add_reader(0, wrap);
-            (ReadCursor { readers: AtomicPtr::new(real_group) }, AtomicPtr::new(reader))
+            (ReadCursor { readers: AtomicPtr::new(real_group) }, reader)
         }
     }
 
@@ -198,7 +198,7 @@ impl ReadCursor {
     // There's no fundamental reason these need to leak,
     // I just haven't implemented the memory management yet.
     // It's not too hard since we can track readers and writers active
-    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> AtomicPtr<Reader> {
+    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> *const Reader {
         let mut current_ptr = self.readers.load(CONSUME);
         loop {
             unsafe {
@@ -211,7 +211,7 @@ impl ReadCursor {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         manager.free(current_ptr, 1);
-                        return AtomicPtr::new(new_reader);
+                        return new_reader as *const Reader;
                     }
                     Err(val) => {
                         current_ptr = val;

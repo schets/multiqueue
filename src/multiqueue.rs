@@ -59,7 +59,7 @@ pub struct MultiWriter<T> {
 
 pub struct MultiReader<T> {
     queue: Arc<MultiQueue<T>>,
-    reader: AtomicPtr<Reader>,
+    reader: *const Reader,
     token: *const MemToken,
 }
 
@@ -259,14 +259,14 @@ impl<T> MultiReader<T> {
         if signal.has_action() {
             self.handle_signals(signal);
         }
-        unsafe { self.queue.pop(&*self.reader.load(Relaxed)) }
+        unsafe { self.queue.pop(&*self.reader) }
     }
 
     pub fn add_reader(&self) -> MultiReader<T> {
         MultiReader {
             queue: self.queue.clone(),
             reader: unsafe {
-                self.queue.tail.add_reader(&*self.reader.load(Relaxed), &self.queue.manager)
+                self.queue.tail.add_reader(&*self.reader, &self.queue.manager)
             },
             token: self.queue.manager.get_token(),
         }
@@ -303,7 +303,7 @@ impl<T> MultiReader<T> {
     /// ```
     pub fn unsubscribe(self) -> bool {
         unsafe {
-            let reader = &*self.reader.load(Relaxed);
+            let reader = &*self.reader;
             reader.get_consumers() == 1
         }
     }
@@ -324,14 +324,13 @@ impl<T> Clone for MultiWriter<T> {
 
 impl<T> Clone for MultiReader<T> {
     fn clone(&self) -> MultiReader<T> {
-        let reader = self.reader.load(Relaxed);
         let rval = MultiReader {
             queue: self.queue.clone(),
-            reader: AtomicPtr::new(reader),
+            reader: self.reader,
             token: self.token,
         };
         unsafe {
-            (*reader).dup_consumer();
+            (*self.reader).dup_consumer();
         }
         rval
     }
@@ -347,7 +346,7 @@ impl<T> Drop for MultiWriter<T> {
 impl<T> Drop for MultiReader<T> {
     fn drop(&mut self) {
         unsafe {
-            let reader = &*self.reader.load(Relaxed);
+            let reader = &*self.reader;
             if reader.remove_consumer() == 1 {
                 self.queue.tail.remove_reader(reader, &self.queue.manager);
                 self.queue.manager.remove_token(self.token);
