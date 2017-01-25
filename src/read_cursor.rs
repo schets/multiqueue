@@ -24,6 +24,7 @@ pub struct ReaderMeta {
     num_consumers: AtomicUsize,
 }
 
+#[derive(Clone, Copy)]
 pub struct Reader {
     pos: *const ReaderPos,
     meta: *const ReaderMeta,
@@ -122,22 +123,21 @@ impl ReaderGroup {
     }
 
     /// Only safe to call from a consumer of the queue!
-    pub unsafe fn add_reader(&self, raw: usize, wrap: u32) -> (*mut ReaderGroup, *mut Reader) {
-        let new_reader = alloc::allocate(1);
+    pub unsafe fn add_reader(&self, raw: usize, wrap: u32) -> (*mut ReaderGroup, Reader) {
         let new_meta = alloc::allocate(1);
         let new_group = alloc::allocate(1);
         let new_pos = alloc::allocate(1);
-        ptr::write(new_pos, ReaderPos { pos_data: CountedIndex::from_usize(raw, wrap) });
+        ptr::write(new_pos,
+                   ReaderPos { pos_data: CountedIndex::from_usize(raw, wrap) });
         ptr::write(new_meta,
                    ReaderMeta {
                        state: Cell::new(ReaderState::Single),
                        num_consumers: AtomicUsize::new(1),
                    });
-        ptr::write(new_reader,
-                   Reader {
-                       pos: new_pos,
-                       meta: new_meta as *const ReaderMeta,
-                   });
+        let new_reader = Reader {
+            pos: new_pos,
+            meta: new_meta as *const ReaderMeta,
+        };
         let mut new_readers = self.readers.clone();
         new_readers.push(new_pos as *const ReaderPos);
         ptr::write(new_group, ReaderGroup { readers: new_readers });
@@ -175,7 +175,7 @@ impl ReaderGroup {
 }
 
 impl ReadCursor {
-    pub fn new(wrap: u32) -> (ReadCursor, *const Reader) {
+    pub fn new(wrap: u32) -> (ReadCursor, Reader) {
         let rg = ReaderGroup::new();
         unsafe {
             let (real_group, reader) = rg.add_reader(0, wrap);
@@ -219,7 +219,7 @@ impl ReadCursor {
     // There's no fundamental reason these need to leak,
     // I just haven't implemented the memory management yet.
     // It's not too hard since we can track readers and writers active
-    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> *const Reader {
+    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> Reader {
         let mut current_ptr = self.readers.load(CONSUME);
         loop {
             unsafe {
@@ -232,15 +232,14 @@ impl ReadCursor {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         manager.free(current_ptr, 1);
-                        return new_reader as *const Reader;
+                        return new_reader;
                     }
                     Err(val) => {
                         current_ptr = val;
                         ptr::read(new_group);
-                        alloc::deallocate((*new_reader).meta as *mut ReaderMeta, 1);
-                        alloc::deallocate((*new_reader).pos as *mut ReaderPos, 1);
+                        alloc::deallocate(new_reader.meta as *mut ReaderMeta, 1);
+                        alloc::deallocate(new_reader.pos as *mut ReaderPos, 1);
                         alloc::deallocate(new_group, 1);
-                        alloc::deallocate(new_reader, 1);
                     }
                 }
             }
