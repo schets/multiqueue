@@ -59,7 +59,7 @@ pub struct MultiWriter<T> {
 
 pub struct MultiReader<T> {
     queue: Arc<MultiQueue<T>>,
-    reader: AtomicPtr<Reader>,
+    reader: Reader,
     token: *const MemToken,
 }
 
@@ -259,14 +259,14 @@ impl<T> MultiReader<T> {
         if signal.has_action() {
             self.handle_signals(signal);
         }
-        unsafe { self.queue.pop(&*self.reader.load(Relaxed)) }
+        unsafe { self.queue.pop(&self.reader) }
     }
 
     pub fn add_reader(&self) -> MultiReader<T> {
         MultiReader {
             queue: self.queue.clone(),
             reader: unsafe {
-                self.queue.tail.add_reader(&*self.reader.load(Relaxed), &self.queue.manager)
+                self.queue.tail.add_reader(&self.reader, &self.queue.manager)
             },
             token: self.queue.manager.get_token(),
         }
@@ -303,8 +303,7 @@ impl<T> MultiReader<T> {
     /// ```
     pub fn unsubscribe(self) -> bool {
         unsafe {
-            let reader = &*self.reader.load(Relaxed);
-            reader.get_consumers() == 1
+            self.reader.get_consumers() == 1
         }
     }
 }
@@ -324,14 +323,13 @@ impl<T> Clone for MultiWriter<T> {
 
 impl<T> Clone for MultiReader<T> {
     fn clone(&self) -> MultiReader<T> {
-        let reader = self.reader.load(Relaxed);
         let rval = MultiReader {
             queue: self.queue.clone(),
-            reader: AtomicPtr::new(reader),
+            reader: self.reader,
             token: self.token,
         };
         unsafe {
-            (*reader).dup_consumer();
+            self.reader.dup_consumer();
         }
         rval
     }
@@ -347,9 +345,8 @@ impl<T> Drop for MultiWriter<T> {
 impl<T> Drop for MultiReader<T> {
     fn drop(&mut self) {
         unsafe {
-            let reader = &*self.reader.load(Relaxed);
-            if reader.remove_consumer() == 1 {
-                self.queue.tail.remove_reader(reader, &self.queue.manager);
+            if self.reader.remove_consumer() == 1 {
+                self.queue.tail.remove_reader(&self.reader, &self.queue.manager);
                 self.queue.manager.remove_token(self.token);
             }
         }
@@ -405,6 +402,7 @@ mod test {
         }
     }
 
+
     fn mpsc_broadcast(senders: usize, receivers: usize) {
         let (writer, reader) = MultiQueue::<(usize, usize)>::new(4);
         let myb = Barrier::new(receivers + senders);
@@ -416,7 +414,6 @@ mod test {
                 scope.spawn(move || {
                     bref.wait();
                     'outer: for i in 0..num_loop {
-                        cur_writer.clone().unsubscribe();
                         for j in 0..100000000 {
                             if cur_writer.push((q, i)).is_ok() {
                                 continue 'outer;

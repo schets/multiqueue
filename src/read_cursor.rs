@@ -15,16 +15,25 @@ enum ReaderState {
     Multi,
 }
 
-pub struct Reader {
+struct ReaderPos {
     pos_data: CountedIndex,
+}
+
+struct ReaderMeta {
     state: Cell<ReaderState>,
     num_consumers: AtomicUsize,
+}
+
+#[derive(Clone, Copy)]
+pub struct Reader {
+    pos: *const ReaderPos,
+    meta: *const ReaderMeta,
 }
 
 /// This represents the reader attempt at loading a transaction
 /// It behaves similarly to a Transaction but has logic for single/multi
 /// readers
-struct ReadAttempt<'a> {
+pub struct ReadAttempt<'a> {
     linked: Transaction<'a>,
     reader: &'a Reader,
     state: ReaderState,
@@ -33,7 +42,7 @@ struct ReadAttempt<'a> {
 /// This holds the set of readers currently active.
 /// This struct is held out of line from the cursor so it's easy to atomically replace it
 struct ReaderGroup {
-    readers: Vec<*const Reader>,
+    readers: Vec<*const ReaderPos>,
 }
 
 #[repr(C)]
@@ -55,9 +64,9 @@ impl<'a> ReadAttempt<'a> {
                 None
             }
             ReaderState::Multi => {
-                if self.reader.num_consumers.load(Ordering::Relaxed) == 1 {
+                if self.reader.get_consumers() == 1 {
                     fence(Ordering::Acquire);
-                    self.reader.state.set(ReaderState::Single);
+                    unsafe { (*self.reader.meta).state.set(ReaderState::Single); }
                     self.linked.commit_direct(by, ord);
                     None
                 } else {
@@ -80,13 +89,30 @@ impl<'a> ReadAttempt<'a> {
 impl Reader {
     #[inline(always)]
     pub fn load_attempt(&self, ord: Ordering) -> ReadAttempt {
-        ReadAttempt {
-            linked: self.pos_data.load_transaction(ord),
-            reader: self,
-            state: self.state.get(),
+        unsafe {
+            ReadAttempt {
+                linked: (*self.pos).pos_data.load_transaction(ord),
+                reader: self,
+                state: (*self.meta).state.get(),
+            }
         }
     }
 
+    pub fn dup_consumer(&self) {
+        unsafe { (*self.meta).dup_consumer() }
+    }
+
+    pub fn remove_consumer(&self) -> usize {
+        unsafe { (*self.meta).remove_consumer() }
+    }
+
+    #[inline(always)]
+    pub fn get_consumers(&self) -> usize {
+        unsafe { (*self.meta).get_consumers() }
+    }
+}
+
+impl ReaderMeta {
     pub fn dup_consumer(&self) {
         if self.num_consumers.fetch_add(1, Ordering::SeqCst) == 1 {
             self.state.set(ReaderState::Multi);
@@ -97,6 +123,7 @@ impl Reader {
         self.num_consumers.fetch_sub(1, Ordering::SeqCst)
     }
 
+    #[inline(always)]
     pub fn get_consumers(&self) -> usize {
         self.num_consumers.load(Ordering::Relaxed)
     }
@@ -108,22 +135,28 @@ impl ReaderGroup {
     }
 
     /// Only safe to call from a consumer of the queue!
-    pub unsafe fn add_reader(&self, raw: usize, wrap: u32) -> (*mut ReaderGroup, *mut Reader) {
-        let new_reader = alloc::allocate(1);
+    pub unsafe fn add_reader(&self, raw: usize, wrap: u32) -> (*mut ReaderGroup, Reader) {
+        let new_reader_pos = alloc::allocate(1);
+        let new_reader_meta = alloc::allocate(1);
         let new_group = alloc::allocate(1);
-        ptr::write(new_reader,
-                   Reader {
+        ptr::write(new_reader_pos,
+                   ReaderPos {
                        pos_data: CountedIndex::from_usize(raw, wrap),
+        });
+        ptr::write(new_reader_meta, ReaderMeta {
                        state: Cell::new(ReaderState::Single),
                        num_consumers: AtomicUsize::new(1),
                    });
         let mut new_readers = self.readers.clone();
-        new_readers.push(new_reader as *const Reader);
+        new_readers.push(new_reader_pos as *const ReaderPos);
         ptr::write(new_group, ReaderGroup { readers: new_readers });
-        (new_group, new_reader)
+        (new_group, Reader {
+            pos: new_reader_pos as *const ReaderPos,
+            meta: new_reader_meta as *const ReaderMeta,
+        })
     }
 
-    pub unsafe fn remove_reader(&self, reader: *const Reader) -> *mut ReaderGroup {
+    pub unsafe fn remove_reader(&self, reader: *const ReaderPos) -> *mut ReaderGroup {
         let new_group = alloc::allocate(1);
         let mut new_readers = self.readers.clone();
         new_readers.retain(|pt| *pt != reader);
@@ -154,11 +187,11 @@ impl ReaderGroup {
 }
 
 impl ReadCursor {
-    pub fn new(wrap: u32) -> (ReadCursor, AtomicPtr<Reader>) {
+    pub fn new(wrap: u32) -> (ReadCursor, Reader) {
         let rg = ReaderGroup::new();
         unsafe {
             let (real_group, reader) = rg.add_reader(0, wrap);
-            (ReadCursor { readers: AtomicPtr::new(real_group) }, AtomicPtr::new(reader))
+            (ReadCursor { readers: AtomicPtr::new(real_group) }, reader)
         }
     }
 
@@ -198,26 +231,27 @@ impl ReadCursor {
     // There's no fundamental reason these need to leak,
     // I just haven't implemented the memory management yet.
     // It's not too hard since we can track readers and writers active
-    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> AtomicPtr<Reader> {
+    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> Reader {
         let mut current_ptr = self.readers.load(CONSUME);
         loop {
             unsafe {
                 let current_group = &*current_ptr;
-                let raw = reader.pos_data.load_raw(Ordering::Relaxed);
-                let wrap = reader.pos_data.wrap_at();
+                let raw = (*reader.pos).pos_data.load_raw(Ordering::Relaxed);
+                let wrap = (*reader.pos).pos_data.wrap_at();
                 let (new_group, new_reader) = current_group.add_reader(raw, wrap);
                 match self.readers
                     .compare_exchange(current_ptr, new_group, Ordering::SeqCst, Ordering::SeqCst) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         manager.free(current_ptr, 1);
-                        return AtomicPtr::new(new_reader);
+                        return new_reader;
                     }
                     Err(val) => {
                         current_ptr = val;
                         ptr::read(new_group);
                         alloc::deallocate(new_group, 1);
-                        alloc::deallocate(new_reader, 1);
+                        alloc::deallocate(new_reader.meta as *mut ReaderMeta, 1);
+                        alloc::deallocate(new_reader.pos as *mut ReaderGroup, 1);
                     }
                 }
             }
@@ -228,7 +262,7 @@ impl ReadCursor {
         let mut current_group = self.readers.load(CONSUME);
         loop {
             unsafe {
-                let new_group = (*current_group).remove_reader(reader);
+                let new_group = (*current_group).remove_reader(&*reader.pos);
                 match self.readers
                     .compare_exchange(current_group,
                                       new_group,
@@ -237,6 +271,8 @@ impl ReadCursor {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         mem.free(current_group, 1);
+                        mem.free(reader.pos as *mut ReaderPos, 1);
+                        mem.free(reader.meta as *mut ReaderMeta, 1);
                         break;
                     }
                     Err(val) => {
