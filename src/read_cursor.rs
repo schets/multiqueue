@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
 
 use alloc;
 use consume::CONSUME;
-use countedindex::{CountedIndex, Transaction};
+use countedindex::{CountedIndex, Index, MAX_WRAP, Transaction};
 use maybe_acquire::{MAYBE_ACQUIRE, maybe_acquire_fence};
 use memory::MemoryManager;
 
@@ -15,11 +15,11 @@ enum ReaderState {
     Multi,
 }
 
-pub struct ReaderPos {
+struct ReaderPos {
     pos_data: CountedIndex,
 }
 
-pub struct ReaderMeta {
+struct ReaderMeta {
     state: Cell<ReaderState>,
     num_consumers: AtomicUsize,
 }
@@ -33,7 +33,7 @@ pub struct Reader {
 /// This represents the reader attempt at loading a transaction
 /// It behaves similarly to a Transaction but has logic for single/multi
 /// readers
-struct ReadAttempt<'a> {
+pub struct ReadAttempt<'a> {
     linked: Transaction<'a>,
     reader: &'a Reader,
     state: ReaderState,
@@ -57,7 +57,7 @@ impl<'a> ReadAttempt<'a> {
     }
 
     #[inline(always)]
-    pub fn commit_attempt(self, by: u32, ord: Ordering) -> Option<ReadAttempt<'a>> {
+    pub fn commit_attempt(self, by: Index, ord: Ordering) -> Option<ReadAttempt<'a>> {
         match self.state {
             ReaderState::Single => {
                 self.linked.commit_direct(by, ord);
@@ -123,7 +123,7 @@ impl ReaderGroup {
     }
 
     /// Only safe to call from a consumer of the queue!
-    pub unsafe fn add_reader(&self, raw: usize, wrap: u32) -> (*mut ReaderGroup, Reader) {
+    pub unsafe fn add_reader(&self, raw: usize, wrap: Index) -> (*mut ReaderGroup, Reader) {
         let new_meta = alloc::allocate(1);
         let new_group = alloc::allocate(1);
         let new_pos = alloc::allocate(1);
@@ -152,7 +152,7 @@ impl ReaderGroup {
         new_group
     }
 
-    pub fn get_max_diff(&self, cur_writer: usize) -> Option<u32> {
+    pub fn get_max_diff(&self, cur_writer: usize) -> Option<Index> {
         let mut max_diff: usize = 0;
         unsafe {
             for reader_ptr in &self.readers {
@@ -161,7 +161,7 @@ impl ReaderGroup {
                 // written to the queue, and a reader has bypassed it. We should retry
                 let rpos = (**reader_ptr).pos_data.load_count(MAYBE_ACQUIRE);
                 let diff = cur_writer.wrapping_sub(rpos);
-                if diff > (1 << 30) {
+                if diff > MAX_WRAP as usize {
                     return None;
                 }
                 max_diff = if diff > max_diff { diff } else { max_diff };
@@ -169,13 +169,12 @@ impl ReaderGroup {
         }
         maybe_acquire_fence();
 
-        assert!(max_diff <= (1 << 30));
-        Some(max_diff as u32)
+        Some(max_diff as Index)
     }
 }
 
 impl ReadCursor {
-    pub fn new(wrap: u32) -> (ReadCursor, Reader) {
+    pub fn new(wrap: Index) -> (ReadCursor, Reader) {
         let rg = ReaderGroup::new();
         unsafe {
             let (real_group, reader) = rg.add_reader(0, wrap);
@@ -192,7 +191,7 @@ impl ReadCursor {
         }
     }
 
-    pub fn get_max_diff(&self, cur_writer: usize) -> Option<u32> {
+    pub fn get_max_diff(&self, cur_writer: usize) -> Option<Index> {
         loop {
             unsafe {
                 let first_ptr = self.readers.load(CONSUME);

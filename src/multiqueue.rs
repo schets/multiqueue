@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
 
 use alloc;
 use atomicsignal::LoadedSignal;
-use countedindex::{CountedIndex, get_valid_wrap, INITIAL_QUEUE_FLAG};
+use countedindex::{CountedIndex, get_valid_wrap, Index, INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
 use memory::{MemoryManager, MemToken};
 
@@ -64,7 +64,7 @@ pub struct MultiReader<T> {
 }
 
 impl<T> MultiQueue<T> {
-    pub fn new(_capacity: u32) -> (MultiWriter<T>, MultiReader<T>) {
+    pub fn new(_capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
         let capacity = get_valid_wrap(_capacity);
         let queuedat = alloc::allocate(capacity as usize);
         unsafe {
@@ -259,7 +259,7 @@ impl<T> MultiReader<T> {
         if signal.has_action() {
             self.handle_signals(signal);
         }
-         self.queue.pop(&self.reader)
+        self.queue.pop(&self.reader)
     }
 
     pub fn add_reader(&self) -> MultiReader<T> {
@@ -300,9 +300,7 @@ impl<T> MultiReader<T> {
     /// writer.push(1).expect("This succeeds since ");
     /// ```
     pub fn unsubscribe(self) -> bool {
-        unsafe {
-            self.reader.get_consumers() == 1
-        }
+        unsafe { self.reader.get_consumers() == 1 }
     }
 }
 
@@ -326,7 +324,7 @@ impl<T> Clone for MultiReader<T> {
             reader: self.reader,
             token: self.token,
         };
-            self.reader.dup_consumer();
+        self.reader.dup_consumer();
         rval
     }
 }
@@ -340,10 +338,10 @@ impl<T> Drop for MultiWriter<T> {
 
 impl<T> Drop for MultiReader<T> {
     fn drop(&mut self) {
-            if self.reader.remove_consumer() == 1 {
-                self.queue.tail.remove_reader(&self.reader, &self.queue.manager);
-                self.queue.manager.remove_token(self.token);
-            }
+        if self.reader.remove_consumer() == 1 {
+            self.queue.tail.remove_reader(&self.reader, &self.queue.manager);
+            self.queue.manager.remove_token(self.token);
+        }
     }
 }
 
@@ -352,7 +350,7 @@ unsafe impl<T> Send for MultiQueue<T> {}
 unsafe impl<T> Send for MultiWriter<T> {}
 unsafe impl<T> Send for MultiReader<T> {}
 
-pub fn multiqueue<T>(capacity: u32) -> (MultiWriter<T>, MultiReader<T>) {
+pub fn multiqueue<T>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
     MultiQueue::new(capacity)
 }
 

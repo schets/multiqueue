@@ -1,24 +1,48 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub fn get_valid_wrap(val: u32) -> u32 {
-    let max = 1 << 30;
-    if val >= max {
-        max
+#[cfg(target_pointer_width="32")]
+mod index_data {
+
+    pub type Index = u32;
+
+    /// 2 less than the highest bits
+    pub const SHIFT_BY: Index = 30;
+
+}
+
+#[cfg(target_pointer_width="64")]
+mod index_data {
+
+    pub type Index = u64;
+
+    /// 2 less than the highest bits
+    pub const SHIFT_BY: Index = 62;
+
+}
+
+pub type Index = index_data::Index;
+
+const SHIFT_BY: Index = index_data::SHIFT_BY;
+pub const MAX_WRAP: Index = 1 << SHIFT_BY;
+
+
+pub fn get_valid_wrap(val: Index) -> Index {
+    if val >= MAX_WRAP {
+        MAX_WRAP
     } else {
         val.next_power_of_two()
     }
 }
 
-fn validate_wrap(val: u32) {
+fn validate_wrap(val: Index) {
     assert!(val.is_power_of_two(),
             "Multiqueue error - non power-of-two size received");
-    assert!(val <= (1 << 30),
+    assert!(val <= MAX_WRAP,
             "Multiqueue error - too large size received");
     assert!(val > 0, "Multiqueue error - zero size received");
 }
-
 // A queue entry will never ever have this value as an initial valid flag
-// Since the upper 2/66 bits will never be set
+// Since the upper 2 bits will never be set
 pub const INITIAL_QUEUE_FLAG: usize = ::std::usize::MAX;
 
 pub struct CountedIndex {
@@ -34,7 +58,7 @@ pub struct Transaction<'a> {
 }
 
 impl CountedIndex {
-    pub fn new(wrap: u32) -> CountedIndex {
+    pub fn new(wrap: Index) -> CountedIndex {
         validate_wrap(wrap);
         CountedIndex {
             val: AtomicUsize::new(0),
@@ -42,7 +66,7 @@ impl CountedIndex {
         }
     }
 
-    pub fn from_usize(val: usize, wrap: u32) -> CountedIndex {
+    pub fn from_usize(val: usize, wrap: Index) -> CountedIndex {
         validate_wrap(wrap);
         CountedIndex {
             val: AtomicUsize::new(val),
@@ -50,13 +74,13 @@ impl CountedIndex {
         }
     }
 
-    pub fn wrap_at(&self) -> u32 {
-        self.mask as u32 + 1
+    pub fn wrap_at(&self) -> Index {
+        self.mask as Index + 1
     }
 
     #[inline(always)]
-    pub fn load(&self, ord: Ordering) -> u32 {
-        (self.val.load(ord) & self.mask) as u32
+    pub fn load(&self, ord: Ordering) -> Index {
+        (self.val.load(ord) & self.mask) as Index
     }
 
     #[inline(always)]
@@ -80,7 +104,7 @@ impl CountedIndex {
     }
 
     #[inline(always)]
-    pub fn get_previous(start: usize, by: u32) -> usize {
+    pub fn get_previous(start: usize, by: Index) -> usize {
         start.wrapping_sub(by as usize)
     }
 }
@@ -100,7 +124,7 @@ impl<'a> Transaction<'a> {
     }
 
     #[inline(always)]
-    pub fn commit(self, by: u32, ord: Ordering) -> Option<Transaction<'a>> {
+    pub fn commit(self, by: Index, ord: Ordering) -> Option<Transaction<'a>> {
         let store_val = self.loaded_vals.wrapping_add(by as usize);
         match self.ptr.compare_exchange_weak(self.loaded_vals, store_val, ord, self.lord) {
             Ok(_) => None,
@@ -116,7 +140,7 @@ impl<'a> Transaction<'a> {
     }
 
     #[inline(always)]
-    pub fn commit_direct(self, by: u32, ord: Ordering) {
+    pub fn commit_direct(self, by: Index, ord: Ordering) {
         let store_val = self.loaded_vals.wrapping_add(by as usize);
         self.ptr.store(store_val, ord);
     }
@@ -134,7 +158,7 @@ mod tests {
 
     use std::sync::atomic::Ordering::*;
 
-    fn test_incr_param(wrap_size: u32, goaround: usize) {
+    fn test_incr_param(wrap_size: Index, goaround: usize) {
         let mycounted = CountedIndex::new(wrap_size);
         for j in 0..goaround {
             for i in 0..wrap_size as usize {
@@ -150,7 +174,7 @@ mod tests {
         assert_eq!(wrap_size as usize * goaround, mycounted.load_count(Relaxed));
     }
 
-    fn test_incr_param_threaded(wrap_size: u32, goaround: usize, nthread: usize) {
+    fn test_incr_param_threaded(wrap_size: Index, goaround: usize, nthread: usize) {
         let mycounted = CountedIndex::new(wrap_size);
         scope(|scope| for _ in 0..nthread {
             scope.spawn(|| for j in 0..goaround {
@@ -182,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_wrapu16() {
-        test_incr_param(1 + ::std::u16::MAX as u32, 2)
+        test_incr_param(1 + ::std::u16::MAX as Index, 2)
     }
 
     #[test]
@@ -197,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_wrapu16_mt() {
-        test_incr_param_threaded(::std::u16::MAX as u32 + 1, 2, 13)
+        test_incr_param_threaded(::std::u16::MAX as Index + 1, 2, 13)
     }
 
     #[test]
