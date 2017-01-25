@@ -15,10 +15,14 @@ enum ReaderState {
     Multi,
 }
 
-pub struct Reader {
-    pos_data: CountedIndex,
+pub struct ReaderMeta {
     state: Cell<ReaderState>,
     num_consumers: AtomicUsize,
+}
+
+pub struct Reader {
+    pos_data: CountedIndex,
+    meta: *const ReaderMeta,
 }
 
 /// This represents the reader attempt at loading a transaction
@@ -55,9 +59,11 @@ impl<'a> ReadAttempt<'a> {
                 None
             }
             ReaderState::Multi => {
-                if self.reader.num_consumers.load(Ordering::Relaxed) == 1 {
+                if unsafe { (*self.reader.meta).num_consumers.load(Ordering::Relaxed) } == 1 {
                     fence(Ordering::Acquire);
-                    self.reader.state.set(ReaderState::Single);
+                    unsafe {
+                        (*self.reader.meta).state.set(ReaderState::Single);
+                    }
                     self.linked.commit_direct(by, ord);
                     None
                 } else {
@@ -83,22 +89,24 @@ impl Reader {
         ReadAttempt {
             linked: self.pos_data.load_transaction(ord),
             reader: self,
-            state: self.state.get(),
+            state: unsafe { (*self.meta).state.get() },
         }
     }
 
     pub fn dup_consumer(&self) {
-        if self.num_consumers.fetch_add(1, Ordering::SeqCst) == 1 {
-            self.state.set(ReaderState::Multi);
+        unsafe {
+            if (*self.meta).num_consumers.fetch_add(1, Ordering::SeqCst) == 1 {
+                (*self.meta).state.set(ReaderState::Multi);
+            }
         }
     }
 
     pub fn remove_consumer(&self) -> usize {
-        self.num_consumers.fetch_sub(1, Ordering::SeqCst)
+        unsafe { (*self.meta).num_consumers.fetch_sub(1, Ordering::SeqCst) }
     }
 
     pub fn get_consumers(&self) -> usize {
-        self.num_consumers.load(Ordering::Relaxed)
+        unsafe { (*self.meta).num_consumers.load(Ordering::Relaxed) }
     }
 }
 
@@ -110,12 +118,17 @@ impl ReaderGroup {
     /// Only safe to call from a consumer of the queue!
     pub unsafe fn add_reader(&self, raw: usize, wrap: u32) -> (*mut ReaderGroup, *mut Reader) {
         let new_reader = alloc::allocate(1);
+        let new_meta = alloc::allocate(1);
         let new_group = alloc::allocate(1);
+        ptr::write(new_meta,
+                   ReaderMeta {
+                       state: Cell::new(ReaderState::Single),
+                       num_consumers: AtomicUsize::new(1),
+                   });
         ptr::write(new_reader,
                    Reader {
                        pos_data: CountedIndex::from_usize(raw, wrap),
-                       state: Cell::new(ReaderState::Single),
-                       num_consumers: AtomicUsize::new(1),
+                       meta: new_meta as *const ReaderMeta,
                    });
         let mut new_readers = self.readers.clone();
         new_readers.push(new_reader as *const Reader);
@@ -216,6 +229,7 @@ impl ReadCursor {
                     Err(val) => {
                         current_ptr = val;
                         ptr::read(new_group);
+                        alloc::deallocate((*new_reader).meta as *mut ReaderMeta, 1);
                         alloc::deallocate(new_group, 1);
                         alloc::deallocate(new_reader, 1);
                     }
@@ -242,6 +256,7 @@ impl ReadCursor {
                     Err(val) => {
                         current_group = val;
                         ptr::read(new_group);
+                        alloc::deallocate(reader.meta as *mut ReaderMeta, 1);
                         alloc::deallocate(new_group, 1);
                     }
                 }

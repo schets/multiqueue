@@ -265,9 +265,7 @@ impl<T> MultiReader<T> {
     pub fn add_reader(&self) -> MultiReader<T> {
         MultiReader {
             queue: self.queue.clone(),
-            reader: unsafe {
-                self.queue.tail.add_reader(&*self.reader, &self.queue.manager)
-            },
+            reader: unsafe { self.queue.tail.add_reader(&*self.reader, &self.queue.manager) },
             token: self.queue.manager.get_token(),
         }
     }
@@ -415,7 +413,6 @@ mod test {
                 scope.spawn(move || {
                     bref.wait();
                     'outer: for i in 0..num_loop {
-                        cur_writer.clone().unsubscribe();
                         for j in 0..100000000 {
                             if cur_writer.push((q, i)).is_ok() {
                                 continue 'outer;
