@@ -15,13 +15,17 @@ enum ReaderState {
     Multi,
 }
 
+pub struct ReaderPos {
+    pos_data: CountedIndex,
+}
+
 pub struct ReaderMeta {
     state: Cell<ReaderState>,
     num_consumers: AtomicUsize,
 }
 
 pub struct Reader {
-    pos_data: CountedIndex,
+    pos: *const ReaderPos,
     meta: *const ReaderMeta,
 }
 
@@ -86,10 +90,12 @@ impl<'a> ReadAttempt<'a> {
 impl Reader {
     #[inline(always)]
     pub fn load_attempt(&self, ord: Ordering) -> ReadAttempt {
-        ReadAttempt {
-            linked: self.pos_data.load_transaction(ord),
-            reader: self,
-            state: unsafe { (*self.meta).state.get() },
+        unsafe {
+            ReadAttempt {
+                linked: (*self.pos).pos_data.load_transaction(ord),
+                reader: self,
+                state: (*self.meta).state.get(),
+            }
         }
     }
 
@@ -120,6 +126,8 @@ impl ReaderGroup {
         let new_reader = alloc::allocate(1);
         let new_meta = alloc::allocate(1);
         let new_group = alloc::allocate(1);
+        let new_pos = alloc::allocate(1);
+        ptr::write(new_pos, ReaderPos { pos_data: CountedIndex::from_usize(raw, wrap) });
         ptr::write(new_meta,
                    ReaderMeta {
                        state: Cell::new(ReaderState::Single),
@@ -127,7 +135,7 @@ impl ReaderGroup {
                    });
         ptr::write(new_reader,
                    Reader {
-                       pos_data: CountedIndex::from_usize(raw, wrap),
+                       pos: new_pos,
                        meta: new_meta as *const ReaderMeta,
                    });
         let mut new_readers = self.readers.clone();
@@ -151,7 +159,7 @@ impl ReaderGroup {
                 // If a reader has passed the writer during this function call
                 // then what must have happened is that somebody else has completed this
                 // written to the queue, and a reader has bypassed it. We should retry
-                let rpos = (**reader_ptr).pos_data.load_count(MAYBE_ACQUIRE);
+                let rpos = (*(**reader_ptr).pos).pos_data.load_count(MAYBE_ACQUIRE);
                 let diff = cur_writer.wrapping_sub(rpos);
                 if diff > (1 << 30) {
                     return None;
@@ -216,8 +224,8 @@ impl ReadCursor {
         loop {
             unsafe {
                 let current_group = &*current_ptr;
-                let raw = reader.pos_data.load_raw(Ordering::Relaxed);
-                let wrap = reader.pos_data.wrap_at();
+                let raw = (*reader.pos).pos_data.load_raw(Ordering::Relaxed);
+                let wrap = (*reader.pos).pos_data.wrap_at();
                 let (new_group, new_reader) = current_group.add_reader(raw, wrap);
                 match self.readers
                     .compare_exchange(current_ptr, new_group, Ordering::SeqCst, Ordering::SeqCst) {
@@ -230,6 +238,7 @@ impl ReadCursor {
                         current_ptr = val;
                         ptr::read(new_group);
                         alloc::deallocate((*new_reader).meta as *mut ReaderMeta, 1);
+                        alloc::deallocate((*new_reader).pos as *mut ReaderPos, 1);
                         alloc::deallocate(new_group, 1);
                         alloc::deallocate(new_reader, 1);
                     }
@@ -251,12 +260,13 @@ impl ReadCursor {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         mem.free(current_group, 1);
+                        mem.free(reader.pos as *mut ReaderPos, 1);
+                        alloc::deallocate(reader.meta as *mut ReaderMeta, 1);
                         break;
                     }
                     Err(val) => {
                         current_group = val;
                         ptr::read(new_group);
-                        alloc::deallocate(reader.meta as *mut ReaderMeta, 1);
                         alloc::deallocate(new_group, 1);
                     }
                 }
