@@ -41,7 +41,7 @@ struct ReadAttempt<'a> {
 /// This holds the set of readers currently active.
 /// This struct is held out of line from the cursor so it's easy to atomically replace it
 struct ReaderGroup {
-    readers: Vec<*const Reader>,
+    readers: Vec<*const ReaderPos>,
 }
 
 #[repr(C)]
@@ -139,12 +139,12 @@ impl ReaderGroup {
                        meta: new_meta as *const ReaderMeta,
                    });
         let mut new_readers = self.readers.clone();
-        new_readers.push(new_reader as *const Reader);
+        new_readers.push(new_pos as *const ReaderPos);
         ptr::write(new_group, ReaderGroup { readers: new_readers });
         (new_group, new_reader)
     }
 
-    pub unsafe fn remove_reader(&self, reader: *const Reader) -> *mut ReaderGroup {
+    pub unsafe fn remove_reader(&self, reader: *const ReaderPos) -> *mut ReaderGroup {
         let new_group = alloc::allocate(1);
         let mut new_readers = self.readers.clone();
         new_readers.retain(|pt| *pt != reader);
@@ -159,7 +159,7 @@ impl ReaderGroup {
                 // If a reader has passed the writer during this function call
                 // then what must have happened is that somebody else has completed this
                 // written to the queue, and a reader has bypassed it. We should retry
-                let rpos = (*(**reader_ptr).pos).pos_data.load_count(MAYBE_ACQUIRE);
+                let rpos = (**reader_ptr).pos_data.load_count(MAYBE_ACQUIRE);
                 let diff = cur_writer.wrapping_sub(rpos);
                 if diff > (1 << 30) {
                     return None;
@@ -251,7 +251,7 @@ impl ReadCursor {
         let mut current_group = self.readers.load(CONSUME);
         loop {
             unsafe {
-                let new_group = (*current_group).remove_reader(reader);
+                let new_group = (*current_group).remove_reader(reader.pos);
                 match self.readers
                     .compare_exchange(current_group,
                                       new_group,
