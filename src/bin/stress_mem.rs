@@ -19,12 +19,18 @@ const WRITERS: usize = 20;
 fn recv(reader: MultiReader<u64>, how_many_r: Arc<AtomicUsize>) -> u64 {
     let mut cur = 0; 
     for _ in 0..2 {
-        for _ in 0..EACH_READER {
+        'outer: for _ in 0..EACH_READER {
+            for _ in 0..100000 {
             match reader.try_recv() {
-                Ok(_) => cur += 1,
+                Ok(_) => {
+                    cur += 1;
+                    continue 'outer;
+                },
                 Err(TryRecvError::Disconnected) => return cur,
                 _ => (),
-            }
+               }
+           }
+           panic!("Couldn't read from queue");
         }
         if how_many_r.load(Ordering::SeqCst) < MAX_READERS {
             let new_reader = reader.add_reader();
@@ -42,13 +48,14 @@ fn recv(reader: MultiReader<u64>, how_many_r: Arc<AtomicUsize>) -> u64 {
 }
 
 fn send(writer: MultiWriter<u64>, num_push: usize) {
-    for i in 0..num_push as u64 {
-        loop {
+    'outer: for i in 0..num_push as u64 {
+        for _ in 0..100000 {
             let topush = i;
             if let Ok(_) =  writer.try_send(topush) {
-                break;
+                continue 'outer;
             }
         }
+        panic!("Couldn't write to queue");
     }
 }
 
