@@ -37,7 +37,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
     bar.wait();
     let mut v = Vec::with_capacity(100000);
     loop {
-        if let Some(popped) = reader.pop() {
+        if let Ok(popped) = reader.pop() {
             match popped {
                 None => break,
                 Some(pushed) => {

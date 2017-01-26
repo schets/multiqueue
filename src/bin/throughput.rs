@@ -15,7 +15,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) -> u64 {
     let start = precise_time_ns();
     let mut cur = 0; 
     loop {
-        if let Some(popped) = reader.pop() {
+        if let Ok(popped) = reader.pop() {
             match popped {
                 None => break,
                 Some(pushed) => {

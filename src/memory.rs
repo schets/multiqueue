@@ -184,7 +184,7 @@ impl MemoryManager {
             let epoch = self.epoch.load(Ordering::Relaxed);
             let token_e = token.epoch.load(Ordering::Relaxed);
             if token_e != epoch {
-                token.store(epoch, Ordering::Release);
+                token.epoch.store(epoch, Ordering::Release);
                 match self.mem_manager.try_lock() {
                     Err(_) => (),
                     Ok(mut inner) => {
