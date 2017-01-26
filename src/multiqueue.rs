@@ -57,8 +57,8 @@ struct MultiQueue<T: Clone> {
 
 pub struct MultiWriter<T: Clone> {
     queue: Arc<MultiQueue<T>>,
-    state: Cell<QueueState>,
     token: *const MemToken,
+    state: Cell<QueueState>,
 }
 
 pub struct MultiReader<T: Clone> {

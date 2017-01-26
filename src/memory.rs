@@ -76,6 +76,9 @@ impl MemoryManagerInner {
     }
 
     pub fn try_freeing(&mut self, at: usize) -> bool {
+        if self.tokens.len() == 0 {
+            return false;
+        }
         for token_ptr in &self.tokens {
             unsafe {
                 let token = &**token_ptr;
@@ -138,6 +141,7 @@ impl MemoryManager {
         }
     }
 
+    #[cold]
     fn do_start_free(&self, elemvec: &mut Vec<ToFree>) -> bool {
         match self.mem_manager.try_lock() {
             Err(val) => {
@@ -158,7 +162,7 @@ impl MemoryManager {
                 let mut newv = Vec::new();
                 mem::swap(&mut newv, elemvec);
                 inner.add_freeable(newv);
-                self.epoch.store(cur_epoch.wrapping_add(1), Ordering::Relaxed);
+                self.epoch.store(cur_epoch.wrapping_add(1), Ordering::Release);
                 self.signal.clear_start_free(Ordering::Relaxed);
                 self.signal.set_epoch(Ordering::Release);
                 true
@@ -170,6 +174,11 @@ impl MemoryManager {
     pub fn free<T>(&self, pt: *mut T, num: usize) {
         let mut elemvec = self.wait_to_free.lock().unwrap();
         elemvec.push(ToFree::new(pt, num));
+        {
+            self.mem_manager.try_lock().map(|mut inner| {
+                inner.try_freeing(self.epoch.load(Ordering::SeqCst));
+            });
+        }
         if elemvec.len() > 20 {
             if !self.do_start_free(&mut elemvec) {
                 self.signal.set_start_free(Ordering::Release);
@@ -185,14 +194,6 @@ impl MemoryManager {
             let token_e = token.epoch.load(Ordering::Relaxed);
             if token_e != epoch {
                 token.epoch.store(epoch, Ordering::Release);
-                match self.mem_manager.try_lock() {
-                    Err(_) => (),
-                    Ok(mut inner) => {
-                        if inner.try_freeing(epoch) {
-                            self.signal.clear_epoch(Ordering::Release);
-                        }
-                    }
-                }
             }
         }
     }
