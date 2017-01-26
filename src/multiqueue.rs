@@ -63,6 +63,10 @@ pub struct MultiReader<T> {
     token: *const MemToken,
 }
 
+pub struct SingleReader<T> {
+    reader: MultiReader<T>,
+}
+
 impl<T> MultiQueue<T> {
     pub fn new(_capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
         let capacity = get_valid_wrap(_capacity);
@@ -190,6 +194,21 @@ impl<T> MultiQueue<T> {
         }
     }
 
+    pub fn pop_view<R, F: FnOnce(&T) -> R>(&self, op: F, reader: &Reader) -> Result<R, F> {
+        let mut ctail_attempt = reader.load_attempt(Relaxed);
+        unsafe {
+            let (ctail, wrap_valid_tag) = ctail_attempt.get();
+            let read_cell = &*self.data.offset(ctail);
+            if read_cell.wraps.load(MAYBE_ACQUIRE) != wrap_valid_tag {
+                return Err(op);
+            }
+            maybe_acquire_fence();
+            let rval = op(&read_cell.val);
+            ctail_attempt.commit_direct(1, Release);
+            Ok(rval)
+        }
+    }
+
     fn reload_tail_multi(&self, tail_cache: usize, count: usize) -> usize {
         if let Some(max_diff_from_head) = self.tail.get_max_diff(count) {
             let current_tail = CountedIndex::get_previous(count, max_diff_from_head);
@@ -255,10 +274,7 @@ impl<T> MultiWriter<T> {
 impl<T> MultiReader<T> {
     #[inline(always)]
     pub fn pop(&self) -> Option<T> {
-        let signal = self.queue.manager.signal.load(Relaxed);
-        if signal.has_action() {
-            self.handle_signals(signal);
-        }
+        self.examine_signals();
         self.queue.pop(&self.reader)
     }
 
@@ -267,6 +283,23 @@ impl<T> MultiReader<T> {
             queue: self.queue.clone(),
             reader: self.queue.tail.add_reader(&self.reader, &self.queue.manager),
             token: self.queue.manager.get_token(),
+        }
+    }
+
+    pub fn into_single(self) -> Result<SingleReader<T>, MultiReader<T>> {
+        if self.reader.get_consumers() == 1 {
+            fence(Acquire);
+            Ok(SingleReader { reader: self })
+        } else {
+            Err(self)
+        }
+    }
+
+    #[inline(always)]
+    fn examine_signals(&self) {
+        let signal = self.queue.manager.signal.load(Relaxed);
+        if signal.has_action() {
+            self.handle_signals(signal);
         }
     }
 
@@ -297,10 +330,32 @@ impl<T> MultiReader<T> {
     /// assert!(!reader_2_2.unsubscribe(), "This returns false since reader_2_1 is still alive");
     /// assert!(reader_2_1.unsubscribe(),
     ///         "This returns true since there are no readers alive in the reader_2_x group");
-    /// writer.push(1).expect("This succeeds since ");
+    /// writer.push(1).expect("This succeeds since  the reader_2 group is not blocking anymore");
     /// ```
     pub fn unsubscribe(self) -> bool {
-        unsafe { self.reader.get_consumers() == 1 }
+        self.reader.get_consumers() == 1
+    }
+}
+
+impl<T> SingleReader<T> {
+    #[inline(always)]
+    pub fn pop(&self) -> Option<T> {
+        self.reader.pop()
+    }
+
+    #[inline(always)]
+    pub fn pop_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, F> {
+        self.reader.examine_signals();
+        self.reader.queue.pop_view(op, &self.reader.reader)
+    }
+
+
+    pub fn into_multi(self) -> MultiReader<T> {
+        self.reader
+    }
+
+    pub fn unsubscribe(self) -> bool {
+        self.reader.unsubscribe()
     }
 }
 
@@ -319,13 +374,11 @@ impl<T> Clone for MultiWriter<T> {
 
 impl<T> Clone for MultiReader<T> {
     fn clone(&self) -> MultiReader<T> {
-        let rval = MultiReader {
+        MultiReader {
             queue: self.queue.clone(),
             reader: self.reader,
-            token: self.token,
-        };
-        self.reader.dup_consumer();
-        rval
+            token: self.queue.manager.get_token(),
+        }
     }
 }
 
@@ -349,6 +402,7 @@ unsafe impl<T> Sync for MultiQueue<T> {}
 unsafe impl<T> Send for MultiQueue<T> {}
 unsafe impl<T> Send for MultiWriter<T> {}
 unsafe impl<T> Send for MultiReader<T> {}
+unsafe impl<T> Send for SingleReader<T> {}
 
 pub fn multiqueue<T>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
     MultiQueue::new(capacity)

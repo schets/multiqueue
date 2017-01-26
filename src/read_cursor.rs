@@ -9,7 +9,7 @@ use countedindex::{CountedIndex, Index, MAX_WRAP, Transaction};
 use maybe_acquire::{MAYBE_ACQUIRE, maybe_acquire_fence};
 use memory::MemoryManager;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum ReaderState {
     Single,
     Multi,
@@ -85,6 +85,13 @@ impl<'a> ReadAttempt<'a> {
                 }
             }
         }
+    }
+
+    #[inline(always)]
+    pub fn commit_direct(self, by: Index, ord: Ordering) {
+        debug_assert!(self.state == ReaderState::Single,
+                      "Direct multiqueue commit used in a multiwriter state");
+        self.linked.commit_direct(by, ord);
     }
 }
 
