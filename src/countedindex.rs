@@ -95,7 +95,8 @@ impl CountedIndex {
         self.mask as Index + 1
     }
 
-    #[allow(dead_code)] // used by tests!
+    #[allow(dead_code)]
+    // used by tests!
     #[inline(always)]
     pub fn load(&self, ord: Ordering) -> Index {
         (self.val.load(ord) & self.mask) as Index
