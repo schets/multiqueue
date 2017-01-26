@@ -10,12 +10,13 @@ use crossbeam::scope;
 
 use std::sync::Barrier;
 
-fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) -> u64 {
+fn recv(bar: &Barrier, mreader: MultiReader<Option<u64>>) -> u64 {
+    let reader = mreader.into_single().unwrap();
     bar.wait();
     let start = precise_time_ns();
     let mut cur = 0; 
     loop {
-        if let Ok(popped) = reader.pop() {
+        if let Ok(popped) = reader.try_recv() {
             match popped {
                 None => break,
                 Some(pushed) => {
@@ -36,12 +37,12 @@ fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize) {
     for i in 0..num_push as u64 {
         loop {
             let topush = Some(i);
-            if let Ok(_) =  writer.push(topush) {
+            if let Ok(_) =  writer.try_send(topush) {
                 break;
             }
         }
     }
-    while let Err(_) = writer.push(None) {}
+    while let Err(_) = writer.try_send(None) {}
 }
 
 fn main() {

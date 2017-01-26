@@ -37,7 +37,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
     bar.wait();
     let mut v = Vec::with_capacity(100000);
     loop {
-        if let Ok(popped) = reader.pop() {
+        if let Ok(popped) = reader.try_recv() {
             match popped {
                 None => break,
                 Some(pushed) => {
@@ -63,7 +63,7 @@ fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize, num_us
     for _ in 0..num_push {
         loop {
             let topush = Some(precise_time_ns());
-            if let Ok(_) =  writer.push(topush) {
+            if let Ok(_) =  writer.try_send(topush) {
                 break;
             }
         }
@@ -71,7 +71,7 @@ fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize, num_us
             waste_50_ns(&val);
         }
     }
-    while let Err(_) = writer.push(None) {};
+    while let Err(_) = writer.try_send(None) {};
 }
 
 fn main() {

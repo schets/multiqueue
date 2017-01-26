@@ -8,6 +8,8 @@ mod index_data {
     /// 2 less than the highest bits
     pub const SHIFT_BY: Index = 30;
 
+    pub const MASK_IND: Index = (1 << 31);
+
 }
 
 #[cfg(target_pointer_width="64")]
@@ -18,17 +20,31 @@ mod index_data {
     /// 2 less than the highest bits
     pub const SHIFT_BY: Index = 62;
 
+    pub const MASK_IND: Index = (1 << 63);
 }
 
 pub type Index = index_data::Index;
 
 const SHIFT_BY: Index = index_data::SHIFT_BY;
+const MASK_IND: usize = index_data::MASK_IND as usize;
+const MASK_TAG: usize = MASK_IND - 1;
 pub const MAX_WRAP: Index = 1 << SHIFT_BY;
 
+#[inline(always)]
+pub fn is_tagged(val: usize) -> bool {
+    (val & MASK_IND) != 0
+}
+
+#[inline(always)]
+pub fn rm_tag(val: usize) -> usize {
+    val & MASK_TAG
+}
 
 pub fn get_valid_wrap(val: Index) -> Index {
     if val >= MAX_WRAP {
         MAX_WRAP
+    } else if val == 0 {
+        2
     } else {
         val.next_power_of_two()
     }
@@ -41,8 +57,9 @@ fn validate_wrap(val: Index) {
             "Multiqueue error - too large size received");
     assert!(val > 0, "Multiqueue error - zero size received");
 }
+
+
 // A queue entry will never ever have this value as an initial valid flag
-// Since the upper 2 bits will never be set
 pub const INITIAL_QUEUE_FLAG: usize = ::std::usize::MAX;
 
 pub struct CountedIndex {
@@ -110,7 +127,7 @@ impl CountedIndex {
 }
 
 impl<'a> Transaction<'a> {
-    /// Loads the index and the expected valid flag, equal to the operation count
+    /// Loads the index, the expected valid flag, and the tag
     #[inline(always)]
     pub fn get(&self) -> (isize, usize) {
         ((self.loaded_vals & self.mask) as isize, self.loaded_vals)
@@ -120,12 +137,12 @@ impl<'a> Transaction<'a> {
     #[inline(always)]
     pub fn matches_previous(&self, val: usize) -> bool {
         let wrap = self.mask.wrapping_add(1);
-        self.loaded_vals.wrapping_sub(wrap) == val
+        rm_tag(self.loaded_vals.wrapping_sub(wrap)) == val
     }
 
     #[inline(always)]
     pub fn commit(self, by: Index, ord: Ordering) -> Option<Transaction<'a>> {
-        let store_val = self.loaded_vals.wrapping_add(by as usize);
+        let store_val = rm_tag(self.loaded_vals.wrapping_add(by as usize));
         match self.ptr.compare_exchange_weak(self.loaded_vals, store_val, ord, self.lord) {
             Ok(_) => None,
             Err(cval) => {
@@ -141,7 +158,7 @@ impl<'a> Transaction<'a> {
 
     #[inline(always)]
     pub fn commit_direct(self, by: Index, ord: Ordering) {
-        let store_val = self.loaded_vals.wrapping_add(by as usize);
+        let store_val = rm_tag(self.loaded_vals.wrapping_add(by as usize));
         self.ptr.store(store_val, ord);
     }
 }

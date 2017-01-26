@@ -4,13 +4,14 @@ use std::fmt;
 use std::mem;
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, fence};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, AtomicBool, fence};
 use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
 use std::sync::mpsc::{TrySendError, TryRecvError};
 
 use alloc;
 use atomicsignal::LoadedSignal;
-use countedindex::{CountedIndex, get_valid_wrap, Index, INITIAL_QUEUE_FLAG};
+use countedindex::{CountedIndex, get_valid_wrap, is_tagged, rm_tag, Index,
+                   INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
 use memory::{MemoryManager, MemToken};
 
@@ -22,7 +23,7 @@ enum QueueState {
     Multi,
 }
 
-/// This holds
+/// This holds entries in the queue
 struct QueueEntry<T> {
     val: T,
     wraps: AtomicUsize,
@@ -31,7 +32,7 @@ struct QueueEntry<T> {
 /// A bounded queue that supports multiple reader and writers
 /// and supports effecient methods for single consumers and producers
 #[repr(C)]
-struct MultiQueue<T> {
+struct MultiQueue<T: Clone> {
     d1: [u8; 64],
 
     // Writer data
@@ -54,23 +55,23 @@ struct MultiQueue<T> {
     d4: [u8; 64],
 }
 
-pub struct MultiWriter<T> {
+pub struct MultiWriter<T: Clone> {
     queue: Arc<MultiQueue<T>>,
     state: Cell<QueueState>,
     token: *const MemToken,
 }
 
-pub struct MultiReader<T> {
+pub struct MultiReader<T: Clone> {
     queue: Arc<MultiQueue<T>>,
     reader: Reader,
     token: *const MemToken,
 }
 
-pub struct SingleReader<T> {
+pub struct SingleReader<T: Clone> {
     reader: MultiReader<T>,
 }
 
-impl<T> MultiQueue<T> {
+impl<T: Clone> MultiQueue<T> {
     pub fn new(_capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
         let capacity = get_valid_wrap(_capacity);
         let queuedat = alloc::allocate(capacity as usize);
@@ -119,7 +120,7 @@ impl<T> MultiQueue<T> {
         (mwriter, mreader)
     }
 
-    pub fn push_multi(&self, val: T) -> Result<(), TrySendError<T>> {
+    pub fn try_send_multi(&self, val: T) -> Result<(), TrySendError<T>> {
         let mut transaction = self.head.load_transaction(Relaxed);
 
         // This tries to ensure the tail fetch metadata is always in the cache
@@ -132,7 +133,7 @@ impl<T> MultiQueue<T> {
             loop {
                 let (chead, wrap_valid_tag) = transaction.get();
                 let write_cell = &mut *self.data.offset(chead);
-                let tail_cache = self.tail_cache.load(Relaxed);
+                let mut tail_cache = self.tail_cache.load(Relaxed);
                 if transaction.matches_previous(tail_cache) {
                     let new_tail = self.reload_tail_multi(tail_cache, wrap_valid_tag);
                     if transaction.matches_previous(new_tail) {
@@ -146,7 +147,13 @@ impl<T> MultiQueue<T> {
                 match transaction.commit(1, Relaxed) {
                     Some(new_transaction) => transaction = new_transaction,
                     None => {
-                        ptr::write(&mut write_cell.val, val);
+                        let current_tag = write_cell.wraps.load(Relaxed);
+                        if is_tagged(current_tag) {
+                            ptr::write(&mut write_cell.val, val);
+                            write_cell.wraps.store(wrap_valid_tag, Release);
+                        } else {
+                            write_cell.val = val;
+                        }
                         write_cell.wraps.store(wrap_valid_tag, Release);
                         return Ok(());
                     }
@@ -155,7 +162,7 @@ impl<T> MultiQueue<T> {
         }
     }
 
-    pub fn push_single(&self, val: T) -> Result<(), TrySendError<T>> {
+    pub fn try_send_single(&self, val: T) -> Result<(), TrySendError<T>> {
         let transaction = self.head.load_transaction(Relaxed);
         let (chead, wrap_valid_tag) = transaction.get();
         self.tail.prefetch_metadata(); // See push_multi on this
@@ -168,20 +175,25 @@ impl<T> MultiQueue<T> {
                     return Err(TrySendError::Full(val));
                 }
             }
-            ptr::write(&mut write_cell.val, val);
             transaction.commit_direct(1, Relaxed);
+            let current_tag = write_cell.wraps.load(Relaxed);
+            if is_tagged(current_tag) {
+                ptr::write(&mut write_cell.val, val);
+            } else {
+                write_cell.val = val;
+            }
             write_cell.wraps.store(wrap_valid_tag, Release);
             Ok(())
         }
     }
 
-    pub fn pop(&self, reader: &Reader) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self, reader: &Reader) -> Result<T, TryRecvError> {
         let mut ctail_attempt = reader.load_attempt(Relaxed);
         unsafe {
             loop {
                 let (ctail, wrap_valid_tag) = ctail_attempt.get();
                 let read_cell = &*self.data.offset(ctail);
-                if read_cell.wraps.load(MAYBE_ACQUIRE) != wrap_valid_tag {
+                if rm_tag(read_cell.wraps.load(MAYBE_ACQUIRE)) != wrap_valid_tag {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
                         return Err(TryRecvError::Disconnected);
@@ -189,11 +201,10 @@ impl<T> MultiQueue<T> {
                     return Err(TryRecvError::Empty);
                 }
                 maybe_acquire_fence();
-                let rval = ptr::read(&read_cell.val);
+                let rval = read_cell.val.clone();
                 match ctail_attempt.commit_attempt(1, Release) {
                     Some(new_attempt) => {
                         ctail_attempt = new_attempt;
-                        mem::forget(rval);
                     }
                     None => return Ok(rval),
                 }
@@ -201,15 +212,15 @@ impl<T> MultiQueue<T> {
         }
     }
 
-    pub fn pop_view<R, F: FnOnce(&T) -> R>(&self,
-                                           op: F,
-                                           reader: &Reader)
-                                           -> Result<R, (F, TryRecvError)> {
+    pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self,
+                                                op: F,
+                                                reader: &Reader)
+                                                -> Result<R, (F, TryRecvError)> {
         let mut ctail_attempt = reader.load_attempt(Relaxed);
         unsafe {
             let (ctail, wrap_valid_tag) = ctail_attempt.get();
             let read_cell = &*self.data.offset(ctail);
-            if read_cell.wraps.load(MAYBE_ACQUIRE) != wrap_valid_tag {
+            if rm_tag(read_cell.wraps.load(MAYBE_ACQUIRE)) != wrap_valid_tag {
                 if self.writers.load(Relaxed) == 0 {
                     fence(Acquire);
                     return Err((op, TryRecvError::Disconnected));
@@ -250,9 +261,9 @@ impl<T> MultiQueue<T> {
     }
 }
 
-impl<T> MultiWriter<T> {
+impl<T: Clone> MultiWriter<T> {
     #[inline(always)]
-    pub fn push(&self, val: T) -> Result<(), TrySendError<T>> {
+    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
         let signal = self.queue.manager.signal.load(Relaxed);
         if signal.has_action() {
             let disconnected = self.handle_signals(signal);
@@ -261,14 +272,14 @@ impl<T> MultiWriter<T> {
             }
         }
         match self.state.get() {
-            QueueState::Single => self.queue.push_single(val),
+            QueueState::Single => self.queue.try_send_single(val),
             QueueState::Multi => {
                 if self.queue.writers.load(Relaxed) == 1 {
                     fence(Acquire);
                     self.state.set(QueueState::Single);
-                    self.queue.push_single(val)
+                    self.queue.try_send_single(val)
                 } else {
-                    self.queue.push_multi(val)
+                    self.queue.try_send_multi(val)
                 }
             }
         }
@@ -289,11 +300,12 @@ impl<T> MultiWriter<T> {
     }
 }
 
-impl<T> MultiReader<T> {
+impl<T: Clone> MultiReader<T> {
+    /// Tries to receive a value from the queue without blocking.
     #[inline(always)]
-    pub fn pop(&self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.examine_signals();
-        self.queue.pop(&self.reader)
+        self.queue.try_recv(&self.reader)
     }
 
     pub fn add_reader(&self) -> MultiReader<T> {
@@ -342,30 +354,35 @@ impl<T> MultiReader<T> {
     /// let (writer, reader) = multiqueue(1);
     /// let reader_2_1 = reader.add_reader();
     /// let reader_2_2 = reader_2_1.clone();
-    /// writer.push(1).expect("This will succeed since queue is empty");
-    /// reader.pop().expect("This reader can read");
-    /// assert!(writer.push(1).is_err(), "This fails since the reader2 group hasn't advanced");
+    /// writer.try_send(1).expect("This will succeed since queue is empty");
+    /// reader.try_recv().expect("This reader can read");
+    /// assert!(writer.try_send(1).is_err(), "This fails since the reader2 group hasn't advanced");
     /// assert!(!reader_2_2.unsubscribe(), "This returns false since reader_2_1 is still alive");
     /// assert!(reader_2_1.unsubscribe(),
     ///         "This returns true since there are no readers alive in the reader_2_x group");
-    /// writer.push(1).expect("This succeeds since  the reader_2 group is not blocking anymore");
+    /// writer.try_send(1).expect("This succeeds since the reader_2 group is not blocking");
     /// ```
     pub fn unsubscribe(self) -> bool {
         self.reader.get_consumers() == 1
     }
 }
 
-impl<T> SingleReader<T> {
-    /// Identical to MultiReader::pop()
+impl<T: Clone + Sync> SingleReader<T> {
+    /// Identical to MultiReader::try_recv()
     #[inline(always)]
-    pub fn pop(&self) -> Result<T, TryRecvError> {
-        self.reader.pop()
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.reader.try_recv()
     }
 
+    /// Behaves almost
     #[inline(always)]
-    pub fn pop_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
+    pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
         self.reader.examine_signals();
-        self.reader.queue.pop_view(op, &self.reader.reader)
+        self.reader.queue.try_recv_view(op, &self.reader.reader)
+    }
+
+    pub fn add_reader(&self) -> SingleReader<T> {
+        self.reader.add_reader().into_single().unwrap()
     }
 
 
@@ -379,7 +396,7 @@ impl<T> SingleReader<T> {
     /// let sreader = mreader.into_single().unwrap();
     /// let mreader2 = sreader.into_multi();
     /// // Can't use sreader anymore!
-    /// // mreader.pop_view(|x| x+1) doesn't work since multireader can't do view methods
+    /// // mreader.try_recv_view(|x| x+1) doesn't work since multireader can't do view methods
     ///
     ///
     /// ```
@@ -393,8 +410,7 @@ impl<T> SingleReader<T> {
     }
 }
 
-impl<T> Clone for MultiWriter<T> {
-
+impl<T: Clone> Clone for MultiWriter<T> {
     /// Clones the writer, allowing multiple writers to push into the queue
     /// from different threads
     /// # Examples
@@ -403,10 +419,10 @@ impl<T> Clone for MultiWriter<T> {
     /// use multiqueue::multiqueue;
     /// let (writer, reader) = multiqueue(16);
     /// let writer2 = writer.clone();
-    /// writer.push(1).unwrap();
-    /// writer2.push(2).unwrap();
-    /// assert_eq!(1, reader.pop().unwrap());
-    /// assert_eq!(2, reader.pop().unwrap());
+    /// writer.try_send(1).unwrap();
+    /// writer2.try_send(2).unwrap();
+    /// assert_eq!(1, reader.try_recv().unwrap());
+    /// assert_eq!(2, reader.try_recv().unwrap());
     /// ```
     fn clone(&self) -> MultiWriter<T> {
         self.state.set(QueueState::Multi);
@@ -420,7 +436,7 @@ impl<T> Clone for MultiWriter<T> {
     }
 }
 
-impl<T> Clone for MultiReader<T> {
+impl<T: Clone> Clone for MultiReader<T> {
     fn clone(&self) -> MultiReader<T> {
         self.reader.dup_consumer();
         MultiReader {
@@ -431,14 +447,14 @@ impl<T> Clone for MultiReader<T> {
     }
 }
 
-impl<T> Drop for MultiWriter<T> {
+impl<T: Clone> Drop for MultiWriter<T> {
     fn drop(&mut self) {
         self.queue.writers.fetch_sub(1, Release);
         self.queue.manager.remove_token(self.token);
     }
 }
 
-impl<T> Drop for MultiReader<T> {
+impl<T: Clone> Drop for MultiReader<T> {
     fn drop(&mut self) {
         if self.reader.remove_consumer() == 1 {
             self.queue.tail.remove_reader(&self.reader, &self.queue.manager);
@@ -447,19 +463,19 @@ impl<T> Drop for MultiReader<T> {
     }
 }
 
-impl<T> fmt::Debug for MultiReader<T> {
+impl<T: Clone> fmt::Debug for MultiReader<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Multireader generic error message!")
     }
 }
 
-unsafe impl<T> Sync for MultiQueue<T> {}
-unsafe impl<T> Send for MultiQueue<T> {}
-unsafe impl<T: Send> Send for MultiWriter<T> {}
-unsafe impl<T: Send> Send for MultiReader<T> {}
-unsafe impl<T: Send> Send for SingleReader<T> {}
+unsafe impl<T: Clone> Sync for MultiQueue<T> {}
+unsafe impl<T: Clone> Send for MultiQueue<T> {}
+unsafe impl<T: Send + Clone> Send for MultiWriter<T> {}
+unsafe impl<T: Send + Clone> Send for MultiReader<T> {}
+unsafe impl<T: Send + Clone + Sync> Send for SingleReader<T> {}
 
-pub fn multiqueue<T>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
+pub fn multiqueue<T: Clone>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
     MultiQueue::new(capacity)
 }
 
@@ -472,16 +488,15 @@ mod test {
     extern crate crossbeam;
     use self::crossbeam::scope;
 
-    use std::sync::atomic::Ordering::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
     use std::sync::mpsc::{TryRecvError, TrySendError};
     use std::thread::yield_now;
 
 
-    fn force_push<T>(w: &MultiWriter<T>, mut val: T) {
+    fn force_push<T: Clone>(w: &MultiWriter<T>, mut val: T) {
         loop {
-            match w.push(val) {
+            match w.try_send(val) {
                 Ok(_) => break,
                 Err(TrySendError::Full(nv)) => val = nv,
                 _ => panic!("No readers left"),
@@ -498,10 +513,10 @@ mod test {
     fn push_pop_test() {
         let (writer, reader) = MultiQueue::<usize>::new(1);
         for _ in 0..100 {
-            assert!(reader.pop().is_err());
-            writer.push(1 as usize).expect("Push should succeed");
-            assert!(writer.push(1).is_err());
-            assert_eq!(1, reader.pop().unwrap());
+            assert!(reader.try_recv().is_err());
+            writer.try_send(1 as usize).expect("Push should succeed");
+            assert!(writer.try_send(1).is_err());
+            assert_eq!(1, reader.try_recv().unwrap());
         }
     }
 
@@ -517,7 +532,7 @@ mod test {
                     bref.wait();
                     'outer: for i in 0..num_loop {
                         for j in 0..100000000 {
-                            if cur_writer.push((q, i)).is_ok() {
+                            if cur_writer.try_send((q, i)).is_ok() {
                                 continue 'outer;
                             }
                             yield_now();
@@ -528,7 +543,7 @@ mod test {
             }
             writer.unsubscribe();
             for _ in 0..receivers {
-                let this_reader = reader.add_reader();
+                let this_reader = reader.add_reader().into_single().unwrap();
                 scope.spawn(move || {
                     let mut myv = Vec::new();
                     for _ in 0..senders {
@@ -538,7 +553,7 @@ mod test {
                     for j in 0..num_loop * senders {
                         this_reader.add_reader().unsubscribe();
                         loop {
-                            if let Ok(val) = this_reader.pop() {
+                            if let Ok(val) = this_reader.try_recv_view(|x| *x) {
                                 assert_eq!(myv[val.0], val.1);
                                 myv[val.0] += 1;
                                 break;
@@ -546,7 +561,7 @@ mod test {
                             yield_now();
                         }
                     }
-                    assert!(this_reader.pop().is_err());
+                    assert!(this_reader.try_recv().is_err());
                 });
             }
             reader.unsubscribe();
@@ -576,20 +591,20 @@ mod test {
     #[test]
     fn test_remove_reader() {
         let (writer, reader) = MultiQueue::<usize>::new(1);
-        assert!(writer.push(1).is_ok());
+        assert!(writer.try_send(1).is_ok());
         let reader_2 = reader.add_reader();
-        assert!(writer.push(1).is_err());
-        assert_eq!(1, reader.pop().unwrap());
-        assert!(reader.pop().is_err());
-        assert_eq!(1, reader_2.pop().unwrap());
-        assert!(reader_2.pop().is_err());
-        assert!(writer.push(1).is_ok());
-        assert!(writer.push(1).is_err());
-        assert_eq!(1, reader.pop().unwrap());
-        assert!(reader.pop().is_err());
+        assert!(writer.try_send(1).is_err());
+        assert_eq!(1, reader.try_recv().unwrap());
+        assert!(reader.try_recv().is_err());
+        assert_eq!(1, reader_2.try_recv().unwrap());
+        assert!(reader_2.try_recv().is_err());
+        assert!(writer.try_send(1).is_ok());
+        assert!(writer.try_send(1).is_err());
+        assert_eq!(1, reader.try_recv().unwrap());
+        assert!(reader.try_recv().is_err());
         reader_2.unsubscribe();
-        assert!(writer.push(2).is_ok());
-        assert_eq!(2, reader.pop().unwrap());
+        assert!(writer.try_send(2).is_ok());
+        assert_eq!(2, reader.try_recv().unwrap());
     }
 
     fn mpmc_broadcast(senders: usize, receivers: usize, nclone: usize) {
@@ -606,7 +621,7 @@ mod test {
                     bref.wait();
                     'outer: for i in 0..num_loop {
                         for j in 0..100000000 {
-                            if cur_writer.push(1).is_ok() {
+                            if cur_writer.try_send(1).is_ok() {
                                 continue 'outer;
                             }
                             yield_now();
@@ -621,16 +636,12 @@ mod test {
                 for _ in 0..nclone {
                     let this_reader = _this_reader.clone();
                     scope.spawn(move || {
-                        let mut myv = Vec::new();
-                        for _ in 0..senders {
-                            myv.push(0);
-                        }
                         bref.wait();
                         loop {
-                            match this_reader.pop() {
+                            match this_reader.try_recv() {
                                 Ok(val) => {
                                     cref.fetch_add(1, Ordering::Relaxed);
-                                },
+                                }
                                 Err(TryRecvError::Disconnected) => break,
                                 _ => yield_now(),
                             }
