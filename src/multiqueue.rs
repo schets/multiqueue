@@ -374,6 +374,7 @@ impl<T> Clone for MultiWriter<T> {
 
 impl<T> Clone for MultiReader<T> {
     fn clone(&self) -> MultiReader<T> {
+        self.reader.dup_consumer();
         MultiReader {
             queue: self.queue.clone(),
             reader: self.reader,
