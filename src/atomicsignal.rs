@@ -2,8 +2,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const UPDATE_EPOCH: usize = 1 << 0;
 const NO_READER: usize = 1 << 1;
-const NO_WRITER: usize = 1 << 2;
-const START_FREE: usize = 1 << 3;
 
 pub struct AtomicSignal {
     flags: AtomicUsize,
@@ -41,34 +39,11 @@ impl AtomicSignal {
         (prev & NO_READER) != 0
     }
 
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn clear_reader(&self, ord: Ordering) -> bool {
         let prev = self.flags.fetch_and(!NO_READER, ord);
         (prev & NO_READER) != 0
-    }
-
-    #[inline(always)]
-    pub fn set_writer(&self, ord: Ordering) -> bool {
-        let prev = self.flags.fetch_or(NO_WRITER, ord);
-        (prev & NO_WRITER) != 0
-    }
-
-    #[inline(always)]
-    pub fn clear_writer(&self, ord: Ordering) -> bool {
-        let prev = self.flags.fetch_and(!NO_READER, ord);
-        (prev & NO_READER) != 0
-    }
-
-    #[inline(always)]
-    pub fn set_start_free(&self, ord: Ordering) -> bool {
-        let prev = self.flags.fetch_or(START_FREE, ord);
-        (prev & START_FREE) != 0
-    }
-
-    #[inline(always)]
-    pub fn clear_start_free(&self, ord: Ordering) -> bool {
-        let prev = self.flags.fetch_and(!START_FREE, ord);
-        (prev & START_FREE) != 0
     }
 }
 
@@ -86,15 +61,5 @@ impl LoadedSignal {
     #[inline(always)]
     pub fn get_reader(&self) -> bool {
         (self.flags & NO_READER) != 0
-    }
-
-    #[inline(always)]
-    pub fn get_writer(&self) -> bool {
-        (self.flags & NO_WRITER) != 0
-    }
-
-    #[inline(always)]
-    pub fn start_free(&self) -> bool {
-        (self.flags & START_FREE) != 0
     }
 }

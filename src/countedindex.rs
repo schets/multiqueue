@@ -95,6 +95,7 @@ impl CountedIndex {
         self.mask as Index + 1
     }
 
+    #[allow(dead_code)] // used by tests!
     #[inline(always)]
     pub fn load(&self, ord: Ordering) -> Index {
         (self.val.load(ord) & self.mask) as Index
@@ -194,8 +195,8 @@ mod tests {
     fn test_incr_param_threaded(wrap_size: Index, goaround: usize, nthread: usize) {
         let mycounted = CountedIndex::new(wrap_size);
         scope(|scope| for _ in 0..nthread {
-            scope.spawn(|| for j in 0..goaround {
-                for i in 0..wrap_size {
+            scope.spawn(|| for _ in 0..goaround {
+                for _ in 0..wrap_size {
                     let mut trans = mycounted.load_transaction(Relaxed);
                     loop {
                         match trans.commit(1, Release) {

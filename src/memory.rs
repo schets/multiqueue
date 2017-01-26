@@ -1,7 +1,6 @@
-use std::error::Error;
 use std::mem;
 use std::ptr;
-use std::sync::{Mutex, TryLockError};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc;
@@ -124,50 +123,17 @@ impl MemoryManager {
     }
 
     #[cold]
-    pub fn start_free(&self) {
-        match self.wait_to_free.try_lock() {
-            Err(val) => {
-                match val {
-                    TryLockError::Poisoned(err) => {
-                        panic!("Couldn't acquire MemoryManager in multiqueue because: {}",
-                               err.description())
-                    }
-                    _ => (),
-                }
-            }
-            Ok(mut elemvec) => {
-                self.do_start_free(&mut elemvec);
-            }
-        }
-    }
-
-    #[cold]
-    fn do_start_free(&self, elemvec: &mut Vec<ToFree>) -> bool {
-        match self.mem_manager.try_lock() {
-            Err(val) => {
-                match val {
-                    TryLockError::Poisoned(err) => {
-                        panic!("Couldn't acquire MemoryManager in multiqueue because: {}",
-                               err.description())
-                    }
-                    _ => (),
-                }
-                false
-            }
-            Ok(mut inner) => {
-                let cur_epoch = self.epoch.load(Ordering::Relaxed);
-                if inner.epoch != cur_epoch {
-                    return false;
-                }
+    fn start_free(&self, elemvec: &mut Vec<ToFree>) {
+        let _ = self.mem_manager.try_lock().map(|mut inner| {
+            let cur_epoch = self.epoch.load(Ordering::Relaxed);
+            if inner.epoch == cur_epoch {
                 let mut newv = Vec::new();
                 mem::swap(&mut newv, elemvec);
                 inner.add_freeable(newv);
                 self.epoch.store(cur_epoch.wrapping_add(1), Ordering::Release);
-                self.signal.clear_start_free(Ordering::Relaxed);
                 self.signal.set_epoch(Ordering::Release);
-                true
             }
-        }
+        });
     }
 
     #[cold]
@@ -175,14 +141,17 @@ impl MemoryManager {
         let mut elemvec = self.wait_to_free.lock().unwrap();
         elemvec.push(ToFree::new(pt, num));
         {
-            self.mem_manager.try_lock().map(|mut inner| {
-                inner.try_freeing(self.epoch.load(Ordering::SeqCst));
-            });
+            let _ = self.mem_manager
+                .try_lock()
+                .map(|mut inner| {
+                    let epoch = self.epoch.load(Ordering::SeqCst);
+                    if inner.try_freeing(epoch) {
+                        self.signal.clear_epoch(Ordering::Release);
+                    }
+                });
         }
         if elemvec.len() > 20 {
-            if !self.do_start_free(&mut elemvec) {
-                self.signal.set_start_free(Ordering::Release);
-            }
+            self.start_free(&mut elemvec);
         }
     }
 

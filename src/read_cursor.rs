@@ -252,7 +252,7 @@ impl ReadCursor {
         }
     }
 
-    pub fn remove_reader(&self, reader: &Reader, mem: &MemoryManager) {
+    pub fn remove_reader(&self, reader: &Reader, mem: &MemoryManager) -> bool {
         let mut current_group = self.readers.load(CONSUME);
         loop {
             unsafe {
@@ -267,7 +267,7 @@ impl ReadCursor {
                         mem.free(current_group, 1);
                         mem.free(reader.pos as *mut ReaderPos, 1);
                         alloc::deallocate(reader.meta as *mut ReaderMeta, 1);
-                        break;
+                        return self.has_readers();
                     }
                     Err(val) => {
                         current_group = val;
@@ -276,6 +276,13 @@ impl ReadCursor {
                     }
                 }
             }
+        }
+    }
+
+    pub fn has_readers(&self) -> bool {
+        unsafe {
+            let current_group = &*self.readers.load(CONSUME);
+            current_group.readers.len() == 0
         }
     }
 }

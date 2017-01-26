@@ -4,14 +4,13 @@ use std::fmt;
 use std::mem;
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, AtomicBool, fence};
+use std::sync::atomic::{AtomicUsize, fence};
 use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
 use std::sync::mpsc::{TrySendError, TryRecvError};
 
 use alloc;
 use atomicsignal::LoadedSignal;
-use countedindex::{CountedIndex, get_valid_wrap, is_tagged, rm_tag, Index,
-                   INITIAL_QUEUE_FLAG};
+use countedindex::{CountedIndex, get_valid_wrap, is_tagged, rm_tag, Index, INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
 use memory::{MemoryManager, MemToken};
 
@@ -133,7 +132,7 @@ impl<T: Clone> MultiQueue<T> {
             loop {
                 let (chead, wrap_valid_tag) = transaction.get();
                 let write_cell = &mut *self.data.offset(chead);
-                let mut tail_cache = self.tail_cache.load(Relaxed);
+                let tail_cache = self.tail_cache.load(Relaxed);
                 if transaction.matches_previous(tail_cache) {
                     let new_tail = self.reload_tail_multi(tail_cache, wrap_valid_tag);
                     if transaction.matches_previous(new_tail) {
@@ -216,7 +215,7 @@ impl<T: Clone> MultiQueue<T> {
                                                 op: F,
                                                 reader: &Reader)
                                                 -> Result<R, (F, TryRecvError)> {
-        let mut ctail_attempt = reader.load_attempt(Relaxed);
+        let ctail_attempt = reader.load_attempt(Relaxed);
         unsafe {
             let (ctail, wrap_valid_tag) = ctail_attempt.get();
             let read_cell = &*self.data.offset(ctail);
@@ -241,12 +240,11 @@ impl<T: Clone> MultiQueue<T> {
                 return current_tail;
             }
             match self.tail_cache.compare_exchange(tail_cache, current_tail, AcqRel, Relaxed) {
-                Ok(val) => current_tail,
+                Ok(_) => current_tail,
                 Err(val) => val,
             }
         } else {
-            let rval = self.tail_cache.load(Acquire);
-            rval
+            self.tail_cache.load(Acquire)
         }
     }
 
@@ -289,12 +287,9 @@ impl<T: Clone> MultiWriter<T> {
     pub fn unsubscribe(self) {}
 
     #[cold]
-    #[inline(never)]
     fn handle_signals(&self, signal: LoadedSignal) -> bool {
         if signal.get_epoch() {
             self.queue.manager.update_token(self.token);
-        } else if signal.start_free() {
-            self.queue.manager.start_free();
         }
         signal.get_reader()
     }
@@ -334,12 +329,9 @@ impl<T: Clone> MultiReader<T> {
     }
 
     #[cold]
-    #[inline(never)]
     fn handle_signals(&self, signal: LoadedSignal) {
         if signal.get_epoch() {
             self.queue.manager.update_token(self.token);
-        } else if signal.start_free() {
-            self.queue.manager.start_free();
         }
     }
 
@@ -392,7 +384,7 @@ impl<T: Clone + Sync> SingleReader<T> {
     ///
     /// ```
     /// use multiqueue::multiqueue;
-    /// let (mwriter, mreader) = multiqueue::<usize>(6);
+    /// let (_, mreader) = multiqueue::<usize>(6);
     /// let sreader = mreader.into_single().unwrap();
     /// let mreader2 = sreader.into_multi();
     /// // Can't use sreader anymore!
@@ -457,7 +449,9 @@ impl<T: Clone> Drop for MultiWriter<T> {
 impl<T: Clone> Drop for MultiReader<T> {
     fn drop(&mut self) {
         if self.reader.remove_consumer() == 1 {
-            self.queue.tail.remove_reader(&self.reader, &self.queue.manager);
+            if self.queue.tail.remove_reader(&self.reader, &self.queue.manager) {
+                self.queue.manager.signal.set_reader(Release);
+            }
             self.queue.manager.remove_token(self.token);
         }
     }
@@ -482,7 +476,6 @@ pub fn multiqueue<T: Clone>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>)
 #[cfg(test)]
 mod test {
 
-    use super::*;
     use super::MultiQueue;
 
     extern crate crossbeam;
@@ -490,19 +483,8 @@ mod test {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
-    use std::sync::mpsc::{TryRecvError, TrySendError};
+    use std::sync::mpsc::{TryRecvError};
     use std::thread::yield_now;
-
-
-    fn force_push<T: Clone>(w: &MultiWriter<T>, mut val: T) {
-        loop {
-            match w.try_send(val) {
-                Ok(_) => break,
-                Err(TrySendError::Full(nv)) => val = nv,
-                _ => panic!("No readers left"),
-            }
-        }
-    }
 
     #[test]
     fn build_queue() {
@@ -531,7 +513,7 @@ mod test {
                 scope.spawn(move || {
                     bref.wait();
                     'outer: for i in 0..num_loop {
-                        for j in 0..100000000 {
+                        for _ in 0..100000000 {
                             if cur_writer.try_send((q, i)).is_ok() {
                                 continue 'outer;
                             }
@@ -550,8 +532,7 @@ mod test {
                         myv.push(0);
                     }
                     bref.wait();
-                    for j in 0..num_loop * senders {
-                        this_reader.add_reader().unsubscribe();
+                    for _ in 0..num_loop * senders {
                         loop {
                             if let Ok(val) = this_reader.try_recv_view(|x| *x) {
                                 assert_eq!(myv[val.0], val.1);
@@ -611,16 +592,16 @@ mod test {
         let (writer, reader) = MultiQueue::<usize>::new(10);
         let myb = Barrier::new((receivers * nclone) + senders);
         let bref = &myb;
-        let num_loop = 100000;
+        let num_loop = 1000000;
         let counter = AtomicUsize::new(0);
         let cref = &counter;
         scope(|scope| {
-            for q in 0..senders {
+            for _ in 0..senders {
                 let cur_writer = writer.clone();
                 scope.spawn(move || {
                     bref.wait();
-                    'outer: for i in 0..num_loop {
-                        for j in 0..100000000 {
+                    'outer: for _ in 0..num_loop {
+                        for _ in 0..100000000 {
                             if cur_writer.try_send(1).is_ok() {
                                 continue 'outer;
                             }
@@ -639,7 +620,7 @@ mod test {
                         bref.wait();
                         loop {
                             match this_reader.try_recv() {
-                                Ok(val) => {
+                                Ok(_) => {
                                     cref.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Err(TryRecvError::Disconnected) => break,
