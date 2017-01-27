@@ -204,7 +204,7 @@ impl<T: Clone> MultiQueue<T> {
         }
     }
 
-    pub fn try_recv(&self, reader: &Reader) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self, reader: &Reader) -> Result<T, (*const AtomicUsize, TryRecvError)> {
         let mut ctail_attempt = reader.load_attempt(Relaxed);
         unsafe {
             loop {
@@ -223,10 +223,10 @@ impl<T: Clone> MultiQueue<T> {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
                         if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
-                            return Err(TryRecvError::Disconnected);
+                            return Err((ptr::null(), TryRecvError::Disconnected));
                         }
                     }
-                    return Err(TryRecvError::Empty);
+                    return Err((&read_cell.wraps, TryRecvError::Empty));
                 }
                 let rval = read_cell.val.clone();
                 match ctail_attempt.commit_attempt(1, Release) {
@@ -242,7 +242,7 @@ impl<T: Clone> MultiQueue<T> {
     pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self,
                                                 op: F,
                                                 reader: &Reader)
-                                                -> Result<R, (F, TryRecvError)> {
+                                                -> Result<R, (F, *const AtomicUsize, TryRecvError)> {
         let ctail_attempt = reader.load_attempt(Relaxed);
         unsafe {
             let (ctail, wrap_valid_tag) = ctail_attempt.get();
@@ -251,10 +251,10 @@ impl<T: Clone> MultiQueue<T> {
                 if self.writers.load(Relaxed) == 0 {
                     fence(Acquire);
                     if rm_tag(read_cell.wraps.load(MAYBE_ACQUIRE)) != wrap_valid_tag {
-                        return Err((op, TryRecvError::Disconnected));
+                        return Err((op, ptr::null(), TryRecvError::Disconnected));
                     }
                 }
-                return Err((op, TryRecvError::Empty));
+                return Err((op, &read_cell.wraps, TryRecvError::Empty));
             }
             let rval = op(&read_cell.val);
             ctail_attempt.commit_direct(1, Release);
@@ -329,18 +329,21 @@ impl<T: Clone> MultiReader<T> {
     #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.examine_signals();
-        self.queue.try_recv(&self.reader)
+        match self.queue.try_recv(&self.reader) {
+            Ok(v) => Ok(v),
+            Err((_, e)) => Err(e),
+        }
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
+        self.examine_signals();
         loop {
-            match self.try_recv() {
+            match self.queue.try_recv(&self.reader) {
                 Ok(v) => return Ok(v),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {
+                Err((_, TryRecvError::Disconnected)) => return Err(RecvError),
+                Err((pt, TryRecvError::Empty)) => {
                     let count = self.reader.load_count(Relaxed);
-                    let index = &self.queue.head;
-                    self.queue.waiter.wait(count, index);
+                    unsafe { self.queue.waiter.wait(count, &*pt); }
                 }
             }
         }
@@ -419,20 +422,23 @@ impl<T: Clone + Sync> SingleReader<T> {
     #[inline(always)]
     pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
         self.reader.examine_signals();
-        self.reader.queue.try_recv_view(op, &self.reader.reader)
+        match self.reader.queue.try_recv_view(op, &self.reader.reader) {
+            Ok(v) => Ok(v),
+            Err((op, _, e)) => Err((op, e)),
+        }
     }
 
     pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, mut op: F) -> Result<R, (F, RecvError)> {
+        self.reader.examine_signals();
         loop {
-            match self.try_recv_view(op) {
+            match self.reader.queue.try_recv_view(op, &self.reader.reader) {
                 Ok(v) => return Ok(v),
-                Err((o, TryRecvError::Disconnected)) => return Err((o, RecvError)),
-                Err((o, TryRecvError::Empty)) => {
+                Err((o, _, TryRecvError::Disconnected)) => return Err((o, RecvError)),
+                Err((o, pt, TryRecvError::Empty)) => {
                     op = o;
                     let count = self.reader.reader.load_count(Relaxed);
-                    let index = &self.reader.queue.head;
-                    self.reader.queue.waiter.wait(count, index);
-                }
+                    unsafe { self.reader.queue.waiter.wait(count, &*pt); }
+                },
             }
         }
     }

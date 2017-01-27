@@ -1,19 +1,24 @@
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::AtomicUsize;
 use std::thread::yield_now;
 
-use countedindex::{CountedIndex, past};
+use countedindex::{past, rm_tag};
 
 extern crate parking_lot;
 
 const DEFAULT_YIELD_SPINS: usize = 50;
 const DEFAULT_TRY_SPINS: usize = 1000;
 
-/// This trait determines how readers wait on the empty queue
+#[inline(always)]
+fn load_tagless(val: &AtomicUsize) -> usize {
+    rm_tag(val.load(Relaxed))
+}
+
 pub trait Wait {
     /// Causes the reader to block until the queue is available. Is passed
-    /// the index which the readers are waiting on and a reference to the
-    /// index which the writers are using
-    fn wait(&self, usize, &CountedIndex);
+    /// the queue tag which the readers are waiting on and a reference to the
+    /// corresponding AtomicUsize
+    fn wait(&self, usize, &AtomicUsize);
 
     /// Called by writers to awaken waiting readers
     fn notify(&self);
@@ -25,16 +30,18 @@ pub trait Wait {
     }
 }
 
-/// Waiting
+/// Thus spins in a loop on the queue waiting for a value to be ready
 #[derive(Copy, Clone)]
 pub struct BusyWait {}
 
+/// This spins on the queue for a few iterations and then starts yielding intermittently
 #[derive(Copy, Clone)]
 pub struct YieldingWait {
     spins_first: usize,
     spins_yield: usize,
 }
 
+/// This tries spinning on the queue for a short while, then yielding, and then blocks
 pub struct BlockingWait {
     spins_first: usize,
     spins_yield: usize,
@@ -85,9 +92,9 @@ impl BlockingWait {
 
 impl Wait for BusyWait {
     #[cold]
-    fn wait(&self, seq: usize, w_pos: &CountedIndex) {
+    fn wait(&self, seq: usize, w_pos: &AtomicUsize) {
         loop {
-            let cur_pos = w_pos.load_count(Relaxed);
+            let cur_pos = load_tagless(w_pos);
             if cur_pos == seq || past(seq, cur_pos).1 {
                 return;
             }
@@ -101,16 +108,16 @@ impl Wait for BusyWait {
 
 impl Wait for YieldingWait {
     #[cold]
-    fn wait(&self, seq: usize, w_pos: &CountedIndex) {
+    fn wait(&self, seq: usize, w_pos: &AtomicUsize) {
         for _ in 0..self.spins_first {
-            let cur_pos = w_pos.load_count(Relaxed);
+            let cur_pos = load_tagless(w_pos);
             if cur_pos == seq || past(seq, cur_pos).1 {
                 return;
             }
         }
         loop {
             for _ in 0..self.spins_yield {
-                let cur_pos = w_pos.load_count(Relaxed);
+                let cur_pos = load_tagless(w_pos);
                 if cur_pos == seq || past(seq, cur_pos).1 {
                     return;
                 }
@@ -126,15 +133,15 @@ impl Wait for YieldingWait {
 
 impl Wait for BlockingWait {
     #[cold]
-    fn wait(&self, seq: usize, w_pos: &CountedIndex) {
+    fn wait(&self, seq: usize, w_pos: &AtomicUsize) {
         for _ in 0..self.spins_first {
-            let cur_pos = w_pos.load_count(Relaxed);
+            let cur_pos = load_tagless(w_pos);
             if cur_pos == seq || past(seq, cur_pos).1 {
                 return;
             }
         }
         for _ in 0..self.spins_yield {
-            let cur_pos = w_pos.load_count(Relaxed);
+            let cur_pos = load_tagless(w_pos);
             if cur_pos == seq || past(seq, cur_pos).1 {
                 return;
             }
@@ -144,13 +151,13 @@ impl Wait for BlockingWait {
         loop {
             {
                 let mut lock = self.lock.lock();
-                let cur_pos = w_pos.load_count(Relaxed);
+                let cur_pos = load_tagless(w_pos);
                 if cur_pos == seq || past(seq, cur_pos).1 {
                     return;
                 }
                 self.condvar.wait(&mut lock);
             }
-            let cur_pos = w_pos.load_count(Relaxed);
+            let cur_pos = load_tagless(w_pos);
             if cur_pos == seq || past(seq, cur_pos).1 {
                 return;
             }

@@ -5,8 +5,8 @@ mod index_data {
 
     pub type Index = u32;
 
-    /// 2 less than the highest bits
-    pub const SHIFT_BY: Index = 30;
+    // 03th and 31 bit are available
+    pub const MAX_WRAP: Index = (1 << 30) - 1;
 
     pub const MASK_IND: Index = (1 << 31);
 
@@ -18,17 +18,16 @@ mod index_data {
     pub type Index = u64;
 
     /// 2 less than the highest bits
-    pub const SHIFT_BY: Index = 62;
+    pub const MAX_WRAP: Index = (1 << 62) - 1;
 
     pub const MASK_IND: Index = (1 << 63);
 }
 
 pub type Index = index_data::Index;
 
-const SHIFT_BY: Index = index_data::SHIFT_BY;
 const MASK_IND: usize = index_data::MASK_IND as usize;
 const MASK_TAG: usize = MASK_IND - 1;
-pub const MAX_WRAP: Index = 1 << SHIFT_BY;
+const MAX_WRAP: Index = index_data::MAX_WRAP;
 
 #[inline(always)]
 pub fn past(check: usize, seq: usize) -> (usize, bool) {
