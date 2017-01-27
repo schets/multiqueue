@@ -2,7 +2,7 @@ extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
-use multiqueue::{MultiReader, MultiWriter, multiqueue};
+use multiqueue::{MultiReader, MultiWriter, multiqueue_with, wait};
 
 use time::precise_time_ns;
 
@@ -16,8 +16,7 @@ fn recv(bar: &Barrier, mreader: MultiReader<Option<u64>>) -> u64 {
     let start = precise_time_ns();
     let mut cur = 0; 
     loop {
-        if let Ok(popped) = reader.try_recv() {
-            match popped {
+            match reader.recv().unwrap() {
                 None => break,
                 Some(pushed) => {
                     if cur != pushed {
@@ -26,7 +25,6 @@ fn recv(bar: &Barrier, mreader: MultiReader<Option<u64>>) -> u64 {
                     cur += 1;
                 }
             }
-        }
     }
 
     precise_time_ns() - start
@@ -47,7 +45,7 @@ fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize) {
 
 fn main() {
     let num_do = 10000000;
-    let (writer, reader) = multiqueue(20000);
+    let (writer, reader) = multiqueue_with(20000, wait::YieldingWait::new());
     let bar = Barrier::new(2);
     let bref = &bar;
     scope(|scope| {

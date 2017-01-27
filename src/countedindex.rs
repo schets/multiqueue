@@ -31,6 +31,12 @@ const MASK_TAG: usize = MASK_IND - 1;
 pub const MAX_WRAP: Index = 1 << SHIFT_BY;
 
 #[inline(always)]
+pub fn past(check: usize, seq: usize) -> (usize, bool) {
+    let diff = check.wrapping_sub(seq);
+    (diff, diff > MAX_WRAP as usize)
+}
+
+#[inline(always)]
 pub fn is_tagged(val: usize) -> bool {
     (val & MASK_IND) != 0
 }

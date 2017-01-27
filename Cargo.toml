@@ -5,4 +5,5 @@ authors = ["Sam Schetterer <samschet@gmail.com>"]
 
 [dependencies]
 crossbeam = "0.2"
+parking_lot = "0.3"
 time = "*"

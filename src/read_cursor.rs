@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
 
 use alloc;
 use consume::CONSUME;
-use countedindex::{CountedIndex, Index, MAX_WRAP, Transaction};
+use countedindex::{CountedIndex, Index, past, Transaction};
 use maybe_acquire::{MAYBE_ACQUIRE, maybe_acquire_fence};
 use memory::MemoryManager;
 
@@ -107,6 +107,11 @@ impl Reader {
         }
     }
 
+    #[inline(always)]
+    pub fn load_count(&self, ord: Ordering) -> usize {
+        unsafe { (*self.pos).pos_data.load_count(ord) }
+    }
+
     pub fn dup_consumer(&self) {
         unsafe {
             if (*self.meta).num_consumers.fetch_add(1, Ordering::SeqCst) == 1 {
@@ -167,8 +172,8 @@ impl ReaderGroup {
                 // then what must have happened is that somebody else has completed this
                 // written to the queue, and a reader has bypassed it. We should retry
                 let rpos = (**reader_ptr).pos_data.load_count(MAYBE_ACQUIRE);
-                let diff = cur_writer.wrapping_sub(rpos);
-                if diff > MAX_WRAP as usize {
+                let (diff, tofar) = past(cur_writer, rpos);
+                if tofar {
                     return None;
                 }
                 max_diff = if diff > max_diff { diff } else { max_diff };

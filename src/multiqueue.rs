@@ -5,14 +5,15 @@ use std::mem;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, fence};
-use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
-use std::sync::mpsc::{TrySendError, TryRecvError};
+use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel, SeqCst};
+use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
 
 use alloc;
 use atomicsignal::LoadedSignal;
 use countedindex::{CountedIndex, get_valid_wrap, is_tagged, rm_tag, Index, INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
 use memory::{MemoryManager, MemToken};
+use wait::{Wait, BlockingWait};
 
 use read_cursor::{ReadCursor, Reader};
 
@@ -48,6 +49,8 @@ struct MultiQueue<T: Clone> {
     tail: ReadCursor,
     data: *mut QueueEntry<T>,
     capacity: isize,
+    waiter: Box<Wait>,
+    needs_notify: bool,
     d3: [u8; 64],
 
     pub manager: MemoryManager,
@@ -72,6 +75,12 @@ pub struct SingleReader<T: Clone> {
 
 impl<T: Clone> MultiQueue<T> {
     pub fn new(_capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
+        MultiQueue::new_with(_capacity, BlockingWait::new())
+    }
+
+    pub fn new_with<W: Wait + 'static>(_capacity: Index,
+                                       wait: W)
+                                       -> (MultiWriter<T>, MultiReader<T>) {
         let capacity = get_valid_wrap(_capacity);
         let queuedat = alloc::allocate(capacity as usize);
         unsafe {
@@ -82,7 +91,7 @@ impl<T: Clone> MultiQueue<T> {
         }
 
         let (cursor, reader) = ReadCursor::new(capacity);
-
+        let needs_notify = wait.needs_notify();
         let queue = MultiQueue {
             d1: unsafe { mem::uninitialized() },
 
@@ -94,7 +103,8 @@ impl<T: Clone> MultiQueue<T> {
             tail: cursor,
             data: queuedat,
             capacity: capacity as isize,
-
+            waiter: Box::new(wait),
+            needs_notify: needs_notify,
             d3: unsafe { mem::uninitialized() },
 
             manager: MemoryManager::new(),
@@ -139,21 +149,26 @@ impl<T: Clone> MultiQueue<T> {
                         return Err(TrySendError::Full(val));
                     }
                 } else {
-                    // In the other case, there's already an acquire load for tail_cache.
-                    // This speeds up the full queue case for arm
                     maybe_acquire_fence();
                 }
                 match transaction.commit(1, Relaxed) {
                     Some(new_transaction) => transaction = new_transaction,
                     None => {
                         let current_tag = write_cell.wraps.load(Relaxed);
+                        // Should probably make this check depend on a bit in
+                        // the writer index, so the store afterward doesn't depend
+                        // on both that load *and* this likely out-of-cache load
+                        // right here. On Intel shouldn't affect throughput much but
+                        // hits latency a bit, abd on arm there's a fence.
                         if is_tagged(current_tag) {
                             ptr::write(&mut write_cell.val, val);
-                            write_cell.wraps.store(wrap_valid_tag, Release);
                         } else {
                             write_cell.val = val;
                         }
                         write_cell.wraps.store(wrap_valid_tag, Release);
+                        if self.needs_notify {
+                            self.waiter.notify();
+                        }
                         return Ok(());
                     }
                 }
@@ -182,6 +197,9 @@ impl<T: Clone> MultiQueue<T> {
                 write_cell.val = val;
             }
             write_cell.wraps.store(wrap_valid_tag, Release);
+            if self.needs_notify {
+                self.waiter.notify();
+            }
             Ok(())
         }
     }
@@ -192,14 +210,24 @@ impl<T: Clone> MultiQueue<T> {
             loop {
                 let (ctail, wrap_valid_tag) = ctail_attempt.get();
                 let read_cell = &*self.data.offset(ctail);
-                if rm_tag(read_cell.wraps.load(MAYBE_ACQUIRE)) != wrap_valid_tag {
+
+                // For any curious readers, this gnarly if block catchs a race between
+                // advancing the write index and unsubscribing from the queue. in short,
+                // Since unsubscribe happens after the read_cell is written, there's a race
+                // between the first and second if statements. Hence, a second check is required
+                // after the writer load so ensure that the the wrap_valid_tag is still wrong, and hence,
+                // we had actually seen a race. Doing it this way gets rid of some fences on the fast path
+                // so it's worth it. I didn't actually notice this until testing a wait condition which probably
+                // got this to ping in such a way that the race happened.
+                if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
-                        return Err(TryRecvError::Disconnected);
+                        if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
+                            return Err(TryRecvError::Disconnected);
+                        }
                     }
                     return Err(TryRecvError::Empty);
                 }
-                maybe_acquire_fence();
                 let rval = read_cell.val.clone();
                 match ctail_attempt.commit_attempt(1, Release) {
                     Some(new_attempt) => {
@@ -219,14 +247,15 @@ impl<T: Clone> MultiQueue<T> {
         unsafe {
             let (ctail, wrap_valid_tag) = ctail_attempt.get();
             let read_cell = &*self.data.offset(ctail);
-            if rm_tag(read_cell.wraps.load(MAYBE_ACQUIRE)) != wrap_valid_tag {
+            if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
                 if self.writers.load(Relaxed) == 0 {
                     fence(Acquire);
-                    return Err((op, TryRecvError::Disconnected));
+                    if rm_tag(read_cell.wraps.load(MAYBE_ACQUIRE)) != wrap_valid_tag {
+                        return Err((op, TryRecvError::Disconnected));
+                    }
                 }
                 return Err((op, TryRecvError::Empty));
             }
-            maybe_acquire_fence();
             let rval = op(&read_cell.val);
             ctail_attempt.commit_direct(1, Release);
             Ok(rval)
@@ -303,6 +332,21 @@ impl<T: Clone> MultiReader<T> {
         self.queue.try_recv(&self.reader)
     }
 
+    pub fn recv(&self) -> Result<T, RecvError> {
+        loop {
+            match self.try_recv() {
+                Ok(v) => return Ok(v),
+                Err(TryRecvError::Disconnected) => return Err(RecvError),
+                Err(TryRecvError::Empty) => {
+                    let count = self.reader.load_count(Relaxed);
+                    let index = &self.queue.head;
+                    self.queue.waiter.wait(count, index);
+                }
+            }
+        }
+    }
+
+
     pub fn add_reader(&self) -> MultiReader<T> {
         MultiReader {
             queue: self.queue.clone(),
@@ -366,6 +410,11 @@ impl<T: Clone + Sync> SingleReader<T> {
         self.reader.try_recv()
     }
 
+    #[inline(always)]
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.reader.recv()
+    }
+
     /// Behaves almost
     #[inline(always)]
     pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
@@ -373,6 +422,20 @@ impl<T: Clone + Sync> SingleReader<T> {
         self.reader.queue.try_recv_view(op, &self.reader.reader)
     }
 
+    pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, mut op: F) -> Result<R, (F, RecvError)> {
+        loop {
+            match self.try_recv_view(op) {
+                Ok(v) => return Ok(v),
+                Err((o, TryRecvError::Disconnected)) => return Err((o, RecvError)),
+                Err((o, TryRecvError::Empty)) => {
+                    op = o;
+                    let count = self.reader.reader.load_count(Relaxed);
+                    let index = &self.reader.queue.head;
+                    self.reader.queue.waiter.wait(count, index);
+                }
+            }
+        }
+    }
     pub fn add_reader(&self) -> SingleReader<T> {
         self.reader.add_reader().into_single().unwrap()
     }
@@ -423,7 +486,7 @@ impl<T: Clone> Clone for MultiWriter<T> {
             state: Cell::new(QueueState::Multi),
             token: self.queue.manager.get_token(),
         };
-        self.queue.writers.fetch_add(1, Release);
+        self.queue.writers.fetch_add(1, SeqCst);
         rval
     }
 }
@@ -441,7 +504,7 @@ impl<T: Clone> Clone for MultiReader<T> {
 
 impl<T: Clone> Drop for MultiWriter<T> {
     fn drop(&mut self) {
-        self.queue.writers.fetch_sub(1, Release);
+        self.queue.writers.fetch_sub(1, SeqCst);
         self.queue.manager.remove_token(self.token);
     }
 }
@@ -450,7 +513,7 @@ impl<T: Clone> Drop for MultiReader<T> {
     fn drop(&mut self) {
         if self.reader.remove_consumer() == 1 {
             if self.queue.tail.remove_reader(&self.reader, &self.queue.manager) {
-                self.queue.manager.signal.set_reader(Release);
+                self.queue.manager.signal.set_reader(SeqCst);
             }
             self.queue.manager.remove_token(self.token);
         }
@@ -471,6 +534,12 @@ unsafe impl<T: Send + Clone + Sync> Send for SingleReader<T> {}
 
 pub fn multiqueue<T: Clone>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
     MultiQueue::new(capacity)
+}
+
+pub fn multiqueue_with<T: Clone, W: Wait + 'static>(capacity: Index,
+                                                    wait: W)
+                                                    -> (MultiWriter<T>, MultiReader<T>) {
+    MultiQueue::new_with(capacity, wait)
 }
 
 #[cfg(test)]
@@ -540,6 +609,11 @@ mod test {
                                 break;
                             }
                             yield_now();
+                        }
+                    }
+                    for val in myv {
+                        if val != num_loop {
+                            panic!("Wrong number of values obtained for this");
                         }
                     }
                     assert!(this_reader.try_recv().is_err());
