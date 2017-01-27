@@ -167,3 +167,11 @@ impl MemoryManager {
         }
     }
 }
+
+impl Drop for MemoryManagerInner {
+    fn drop(&mut self) {
+        for val in self.tofree.drain(..) {
+            val.delete();
+        }
+    }
+}

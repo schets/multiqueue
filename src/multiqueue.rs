@@ -155,16 +155,18 @@ impl<T: Clone> MultiQueue<T> {
                     Some(new_transaction) => transaction = new_transaction,
                     None => {
                         let current_tag = write_cell.wraps.load(Relaxed);
-                        // Should probably make this check depend on a bit in
-                        // the writer index, so the store afterward doesn't depend
-                        // on both that load *and* this likely out-of-cache load
-                        // right here. On Intel shouldn't affect throughput much but
-                        // hits latency a bit, abd on arm there's a fence.
-                        if is_tagged(current_tag) {
-                            ptr::write(&mut write_cell.val, val);
+
+                        // This will delay the dropping of the exsisting item until
+                        // after the write is done. This will have a marginal effect on
+                        // throughput in most cases but will really help latency.
+                        // Hopefully the compiler is smart enough to get rid of this
+                        // when there's no drop
+                        let _possible_drop = if !is_tagged(current_tag) {
+                            Some(ptr::read(&write_cell.val))
                         } else {
-                            write_cell.val = val;
-                        }
+                            None
+                        };
+                        ptr::write(&mut write_cell.val, val);
                         write_cell.wraps.store(wrap_valid_tag, Release);
                         if self.needs_notify {
                             self.waiter.notify();
@@ -191,11 +193,12 @@ impl<T: Clone> MultiQueue<T> {
             }
             transaction.commit_direct(1, Relaxed);
             let current_tag = write_cell.wraps.load(Relaxed);
-            if is_tagged(current_tag) {
-                ptr::write(&mut write_cell.val, val);
+            let _possible_drop = if !is_tagged(current_tag) {
+                Some(ptr::read(&write_cell.val))
             } else {
-                write_cell.val = val;
-            }
+                None
+            };
+            ptr::write(&mut write_cell.val, val);
             write_cell.wraps.store(wrap_valid_tag, Release);
             if self.needs_notify {
                 self.waiter.notify();
@@ -215,10 +218,8 @@ impl<T: Clone> MultiQueue<T> {
                 // advancing the write index and unsubscribing from the queue. in short,
                 // Since unsubscribe happens after the read_cell is written, there's a race
                 // between the first and second if statements. Hence, a second check is required
-                // after the writer load so ensure that the the wrap_valid_tag is still wrong, and hence,
-                // we had actually seen a race. Doing it this way gets rid of some fences on the fast path
-                // so it's worth it. I didn't actually notice this until testing a wait condition which probably
-                // got this to ping in such a way that the race happened.
+                // after the writer load so ensure that the the wrap_valid_tag is still wrong so
+                // we had actually seen a race. Doing it this way removes fences on the fast path
                 if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
@@ -239,10 +240,11 @@ impl<T: Clone> MultiQueue<T> {
         }
     }
 
-    pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self,
-                                                op: F,
-                                                reader: &Reader)
-                                                -> Result<R, (F, *const AtomicUsize, TryRecvError)> {
+    pub fn try_recv_view<R, F: FnOnce(&T) -> R>
+        (&self,
+         op: F,
+         reader: &Reader)
+         -> Result<R, (F, *const AtomicUsize, TryRecvError)> {
         let ctail_attempt = reader.load_attempt(Relaxed);
         unsafe {
             let (ctail, wrap_valid_tag) = ctail_attempt.get();
@@ -343,7 +345,9 @@ impl<T: Clone> MultiReader<T> {
                 Err((_, TryRecvError::Disconnected)) => return Err(RecvError),
                 Err((pt, TryRecvError::Empty)) => {
                     let count = self.reader.load_count(Relaxed);
-                    unsafe { self.queue.waiter.wait(count, &*pt); }
+                    unsafe {
+                        self.queue.waiter.wait(count, &*pt);
+                    }
                 }
             }
         }
@@ -437,8 +441,10 @@ impl<T: Clone + Sync> SingleReader<T> {
                 Err((o, pt, TryRecvError::Empty)) => {
                     op = o;
                     let count = self.reader.reader.load_count(Relaxed);
-                    unsafe { self.reader.queue.waiter.wait(count, &*pt); }
-                },
+                    unsafe {
+                        self.reader.queue.waiter.wait(count, &*pt);
+                    }
+                }
             }
         }
     }
@@ -770,14 +776,12 @@ mod test {
     impl<'a> Dropper<'a> {
         pub fn new(a: &AtomicUsize) -> Dropper {
             a.fetch_add(1, Ordering::Relaxed);
-            Dropper {
-                aref: a,
-            }
+            Dropper { aref: a }
         }
     }
 
     impl<'a> Drop for Dropper<'a> {
-        fn drop(& mut self) {
+        fn drop(&mut self) {
             self.aref.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -785,9 +789,7 @@ mod test {
     impl<'a> Clone for Dropper<'a> {
         fn clone(&self) -> Dropper<'a> {
             self.aref.fetch_add(1, Ordering::Relaxed);
-            Dropper {
-                aref: self.aref,
-            }
+            Dropper { aref: self.aref }
         }
     }
 
