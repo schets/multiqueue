@@ -49,7 +49,7 @@ struct MultiQueue<T: Clone> {
     tail: ReadCursor,
     data: *mut QueueEntry<T>,
     capacity: isize,
-    waiter: Box<Wait>,
+    pub waiter: Box<Wait>,
     needs_notify: bool,
     d3: [u8; 64],
 
@@ -526,6 +526,22 @@ impl<T: Clone> Drop for MultiReader<T> {
     }
 }
 
+impl<T: Clone> Drop for MultiQueue<T> {
+    fn drop(&mut self) {
+        // everything that's tagged shouldn't be dropped
+        // otherwise, everything else is valid and waiting to be read
+        // or invalid and waiting to be overwritten/dropped
+        for i in 0..self.capacity as isize {
+            unsafe {
+                let cell = &mut *self.data.offset(i);
+                if !is_tagged(cell.wraps.load(Relaxed)) {
+                    ptr::read(&cell.val);
+                }
+            }
+        }
+    }
+}
+
 impl<T: Clone> fmt::Debug for MultiReader<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Multireader generic error message!")
@@ -557,7 +573,7 @@ mod test {
     use self::crossbeam::scope;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
+    use std::sync::{Arc, Barrier};
     use std::sync::mpsc::TryRecvError;
     use std::thread::yield_now;
 
@@ -736,4 +752,56 @@ mod test {
         mpmc_broadcast(2, 2, 2);
     }
 
+    #[test]
+    fn test_baddrop() {
+        // This ensures that a bogus arc isn't dropped from the queue
+        let (writer, reader) = MultiQueue::new(1);
+        for _ in 0..10 {
+            writer.try_send(Arc::new(10)).unwrap();
+            reader.recv().unwrap();
+        }
+    }
+
+
+    struct Dropper<'a> {
+        aref: &'a AtomicUsize,
+    }
+
+    impl<'a> Dropper<'a> {
+        pub fn new(a: &AtomicUsize) -> Dropper {
+            a.fetch_add(1, Ordering::Relaxed);
+            Dropper {
+                aref: a,
+            }
+        }
+    }
+
+    impl<'a> Drop for Dropper<'a> {
+        fn drop(& mut self) {
+            self.aref.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl<'a> Clone for Dropper<'a> {
+        fn clone(&self) -> Dropper<'a> {
+            self.aref.fetch_add(1, Ordering::Relaxed);
+            Dropper {
+                aref: self.aref,
+            }
+        }
+    }
+
+    #[test]
+    fn test_gooddrop() {
+        // This counts the # of drops and creations
+        let count = AtomicUsize::new(0);
+        {
+            let (writer, reader) = MultiQueue::new(1);
+            for _ in 0..10 {
+                writer.try_send(Dropper::new(&count)).unwrap();
+                reader.recv().unwrap();
+            }
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
 }
