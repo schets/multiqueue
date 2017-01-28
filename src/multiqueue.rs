@@ -98,11 +98,11 @@ pub struct FuturesMultiReader<T: Clone> {
     prod_wait: Arc<FuturesWait>,
 }
 
-#[derive(Clone)]
-struct FuturesSingleReader<T: Clone + Sync> {
-    reader: MultiReader<T>,
+pub struct FuturesSingleReader<R, F: FnMut(&T) -> R, T: Clone> {
+    reader: SingleReader<T>,
     wait: Arc<FuturesWait>,
     prod_wait: Arc<FuturesWait>,
+    op: F,
 }
 
 struct FuturesWait {
@@ -396,7 +396,6 @@ impl<T: Clone> MultiReader<T> {
         }
     }
 
-
     pub fn add_reader(&self) -> MultiReader<T> {
         MultiReader {
             queue: self.queue.clone(),
@@ -481,7 +480,6 @@ impl<T: Clone + Sync> SingleReader<T> {
         self.reader.recv()
     }
 
-    /// Behaves almost
     #[inline(always)]
     pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
         self.reader.examine_signals();
@@ -507,6 +505,7 @@ impl<T: Clone + Sync> SingleReader<T> {
             }
         }
     }
+
     pub fn add_reader(&self) -> SingleReader<T> {
         self.reader.add_reader().into_single().unwrap()
     }
@@ -562,8 +561,67 @@ impl<T: Clone> FuturesMultiReader<T> {
         }
     }
 
+    pub fn into_single<R, F: FnMut(&T) -> R>(self, op: F) -> Result<FuturesSingleReader<R, F, T>, (F, FuturesMultiReader<T>)> {
+        let new_mreader;
+        let new_pwait = self.prod_wait.clone();
+        let new_wait = self.wait.clone();
+        {
+            new_mreader = self.reader.clone();
+            drop(self);
+        }
+        match new_mreader.into_single() {
+            Ok(sreader) => {
+                Ok(FuturesSingleReader{
+                    reader: sreader,
+                    wait: new_wait,
+                    prod_wait: new_pwait,
+                    op: op,
+                })
+            },
+            Err(mreader) => {
+                Err((op, FuturesMultiReader{
+                    reader: mreader,
+                    wait: new_wait,
+                    prod_wait: new_pwait,
+                }))
+            },
+        }
+    }
+
     pub fn unsubscribe(self) -> bool {
         self.reader.reader.get_consumers() == 1
+    }
+}
+
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReader<R, F, T> {
+    #[inline(always)]
+    pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
+        let opref = &mut self.op;
+        let rval = self.reader.try_recv_view(|tr| opref(tr));
+        self.prod_wait.notify();
+        rval.map_err(|x| x.1)
+    }
+
+    pub fn add_reader_with<Q, FQ: FnMut(&T) -> Q>(&self, op: FQ) -> FuturesSingleReader<Q, FQ, T> {
+        let rx = self.reader.add_reader();
+        FuturesSingleReader {
+            reader: rx,
+            wait: self.wait.clone(),
+            prod_wait: self.prod_wait.clone(),
+            op: op,
+        }
+    }
+
+    pub fn transform_operation<Q, FQ: FnMut(&T) -> Q>(self,
+                                                      op: FQ)
+                                                      -> FuturesSingleReader<Q, FQ, T> {
+        // Don't know how to satisy borrowck without absurd pointer lies
+        // and forgetting shenanigans. Would rather pay the cost of add_reader for this
+        self.add_reader_with(op)
+    }
+
+    pub fn unsubscribe(self) -> bool {
+        self.reader.reader.reader.get_consumers() == 1
     }
 }
 
@@ -649,7 +707,35 @@ impl<T: Clone> Stream for FuturesMultiReader<T> {
     }
 }
 
-/// FuturesWait
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Stream for FuturesSingleReader<R, F, T> {
+    type Item = R;
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<R>, ()> {
+        self.reader.reader.examine_signals();
+        loop {
+        let opref = &mut self.op;
+            match self.reader.reader.queue.try_recv_view(|tr| opref(tr), &self.reader.reader.reader) {
+                Ok(msg) => {
+                    self.prod_wait.notify();
+                    return Ok(Async::Ready(Some(msg)));
+                }
+                Err((_, _, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
+                Err((_, pt, _)) => {
+                    let count = self.reader.reader.reader.load_count(Relaxed);
+                    if unsafe {
+                        self.wait.fut_wait(count, &*pt, &self.reader.reader.queue.writers)
+                    } {
+                        return Ok(Async::NotReady);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+//////// FuturesWait
 
 impl FuturesWait {
     pub fn new() -> FuturesWait {
@@ -841,6 +927,14 @@ impl<T: Clone> Drop for FuturesMultiReader<T> {
     }
 }
 
+impl<R, F: FnMut(&T) -> R, T: Clone> Drop for FuturesSingleReader<R, F, T> {
+    fn drop(&mut self) {
+        let prod_wait = self.prod_wait.clone();
+        self.reader.reader.do_unsubscribe_with(|| { prod_wait.notify(); })
+    }
+}
+
+
 impl<T: Clone> fmt::Debug for MultiReader<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Multireader generic error message!")
@@ -851,7 +945,7 @@ unsafe impl<T: Clone> Sync for MultiQueue<T> {}
 unsafe impl<T: Clone> Send for MultiQueue<T> {}
 unsafe impl<T: Send + Clone> Send for MultiWriter<T> {}
 unsafe impl<T: Send + Clone> Send for MultiReader<T> {}
-unsafe impl<T: Send + Clone + Sync> Send for SingleReader<T> {}
+unsafe impl<T: Send + Clone> Send for SingleReader<T> {}
 
 pub fn multiqueue<T: Clone>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
     MultiQueue::new(capacity)
