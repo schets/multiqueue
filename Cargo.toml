@@ -6,5 +6,6 @@ authors = ["Sam Schetterer <samschet@gmail.com>"]
 [dependencies]
 crossbeam = "0.2"
 futures = "0.1.9"
+smallvec = "0.3.1"
 parking_lot = "0.3"
 time = "*"

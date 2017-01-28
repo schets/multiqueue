@@ -6,28 +6,32 @@ use countedindex::{past, rm_tag};
 
 extern crate parking_lot;
 
-const DEFAULT_YIELD_SPINS: usize = 50;
-const DEFAULT_TRY_SPINS: usize = 1000;
+pub const DEFAULT_YIELD_SPINS: usize = 50;
+pub const DEFAULT_TRY_SPINS: usize = 1000;
 
 #[inline(always)]
-fn load_tagless(val: &AtomicUsize) -> usize {
+pub fn load_tagless(val: &AtomicUsize) -> usize {
     rm_tag(val.load(Relaxed))
+}
+
+#[inline(always)]
+pub fn check(seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
+    let cur_count = load_tagless(at);
+    wc.load(Relaxed) == 0 || seq == cur_count || past(seq, cur_count).1
 }
 
 pub trait Wait {
     /// Causes the reader to block until the queue is available. Is passed
-    /// the queue tag which the readers are waiting on and a reference to the
-    /// corresponding AtomicUsize
-    fn wait(&self, usize, &AtomicUsize);
+    /// the queue tag which the readers are waiting on, a reference to the
+    /// corresponding AtomicUsize, and a reference to the number of writers
+    fn wait(&self, usize, &AtomicUsize, &AtomicUsize);
 
     /// Called by writers to awaken waiting readers
     fn notify(&self);
 
     /// Returns whether writers need to call notify
     /// Optimized the various BusyWait variants
-    fn needs_notify(&self) -> bool {
-        false
-    }
+    fn needs_notify(&self) -> bool;
 }
 
 /// Thus spins in a loop on the queue waiting for a value to be ready
@@ -90,14 +94,11 @@ impl BlockingWait {
     }
 }
 
-
-
 impl Wait for BusyWait {
     #[cold]
-    fn wait(&self, seq: usize, w_pos: &AtomicUsize) {
+    fn wait(&self, seq: usize, w_pos: &AtomicUsize, wc: &AtomicUsize) {
         loop {
-            let cur_pos = load_tagless(w_pos);
-            if cur_pos == seq || past(seq, cur_pos).1 {
+            if check(seq, w_pos, wc) {
                 return;
             }
         }
@@ -105,75 +106,77 @@ impl Wait for BusyWait {
 
     fn notify(&self) {
         // Nothing here since the waiter just blocks on the writer flag
+    }
+
+    fn needs_notify(&self) -> bool {
+        false
     }
 }
 
 impl Wait for YieldingWait {
     #[cold]
-    fn wait(&self, seq: usize, w_pos: &AtomicUsize) {
+    fn wait(&self, seq: usize, w_pos: &AtomicUsize, wc: &AtomicUsize) {
         for _ in 0..self.spins_first {
-            let cur_pos = load_tagless(w_pos);
-            if cur_pos == seq || past(seq, cur_pos).1 {
+            if check(seq, w_pos, wc) {
                 return;
             }
         }
         loop {
             for _ in 0..self.spins_yield {
-                let cur_pos = load_tagless(w_pos);
-                if cur_pos == seq || past(seq, cur_pos).1 {
+                yield_now();
+                if check(seq, w_pos, wc) {
                     return;
                 }
             }
-            yield_now();
         }
     }
 
     fn notify(&self) {
         // Nothing here since the waiter just blocks on the writer flag
     }
+
+    fn needs_notify(&self) -> bool {
+        false
+    }
 }
+
 
 impl Wait for BlockingWait {
     #[cold]
-    fn wait(&self, seq: usize, w_pos: &AtomicUsize) {
+    fn wait(&self, seq: usize, w_pos: &AtomicUsize, wc: &AtomicUsize) {
         for _ in 0..self.spins_first {
-            let cur_pos = load_tagless(w_pos);
-            if cur_pos == seq || past(seq, cur_pos).1 {
+            if check(seq, w_pos, wc) {
                 return;
             }
         }
         for _ in 0..self.spins_yield {
-            let cur_pos = load_tagless(w_pos);
-            if cur_pos == seq || past(seq, cur_pos).1 {
+            yield_now();
+            if check(seq, w_pos, wc) {
                 return;
             }
-            yield_now();
         }
 
         loop {
             {
                 let mut lock = self.lock.lock();
-                let cur_pos = load_tagless(w_pos);
-                if cur_pos == seq || past(seq, cur_pos).1 {
+                if check(seq, w_pos, wc) {
                     return;
                 }
                 self.condvar.wait(&mut lock);
             }
-            let cur_pos = load_tagless(w_pos);
-            if cur_pos == seq || past(seq, cur_pos).1 {
+            if check(seq, w_pos, wc) {
                 return;
             }
 
         }
     }
 
-    #[allow(unused_variables)]
     fn notify(&self) {
         // I don't try and do any flag tricks here to avoid the notify
         // since they would require a store-load fence or an rmw operation.
         // on top of potentially doing the mutex and condition variable.
         // The fast path here is pretty fast anyways
-        let lock = self.lock.lock();
+        let _lock = self.lock.lock();
         self.condvar.notify_all();
     }
 
@@ -182,15 +185,11 @@ impl Wait for BlockingWait {
     }
 }
 
-
-
-
 impl Clone for BlockingWait {
     fn clone(&self) -> BlockingWait {
         BlockingWait::with_spins(self.spins_first, self.spins_yield)
     }
 }
-
 
 #[cfg(test)]
 mod test {

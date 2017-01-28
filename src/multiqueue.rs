@@ -1,21 +1,31 @@
 
+use std::any::Any;
 use std::cell::Cell;
+use std::error::Error;
 use std::fmt;
 use std::mem;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, fence};
-use std::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel, SeqCst};
+use std::sync::atomic::Ordering::*;
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
+use std::thread::yield_now;
 
 use alloc;
 use atomicsignal::LoadedSignal;
 use countedindex::{CountedIndex, get_valid_wrap, is_tagged, rm_tag, Index, INITIAL_QUEUE_FLAG};
 use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
 use memory::{MemoryManager, MemToken};
-use wait::{Wait, BlockingWait};
+use wait::*;
 
 use read_cursor::{ReadCursor, Reader};
+
+extern crate futures;
+extern crate parking_lot;
+extern crate smallvec;
+
+use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
+use self::futures::task::{park, Task};
 
 #[derive(Clone, Copy)]
 enum QueueState {
@@ -32,7 +42,7 @@ struct QueueEntry<T> {
 /// A bounded queue that supports multiple reader and writers
 /// and supports effecient methods for single consumers and producers
 #[repr(C)]
-struct MultiQueue<T: Clone> {
+pub struct MultiQueue<T: Clone> {
     d1: [u8; 64],
 
     // Writer data
@@ -49,7 +59,7 @@ struct MultiQueue<T: Clone> {
     tail: ReadCursor,
     data: *mut QueueEntry<T>,
     capacity: isize,
-    pub waiter: Box<Wait>,
+    pub waiter: Arc<Wait>,
     needs_notify: bool,
     d3: [u8; 64],
 
@@ -67,10 +77,38 @@ pub struct MultiReader<T: Clone> {
     queue: Arc<MultiQueue<T>>,
     reader: Reader,
     token: *const MemToken,
+    alive: bool,
 }
 
 pub struct SingleReader<T: Clone> {
     reader: MultiReader<T>,
+}
+
+#[derive(Clone)]
+pub struct FuturesMultiWriter<T: Clone> {
+    writer: MultiWriter<T>,
+    wait: Arc<FuturesWait>,
+    prod_wait: Arc<FuturesWait>,
+}
+
+#[derive(Clone)]
+pub struct FuturesMultiReader<T: Clone> {
+    reader: MultiReader<T>,
+    wait: Arc<FuturesWait>,
+    prod_wait: Arc<FuturesWait>,
+}
+
+#[derive(Clone)]
+struct FuturesSingleReader<T: Clone + Sync> {
+    reader: MultiReader<T>,
+    wait: Arc<FuturesWait>,
+    prod_wait: Arc<FuturesWait>,
+}
+
+struct FuturesWait {
+    spins_first: usize,
+    spins_yield: usize,
+    parked: parking_lot::Mutex<Vec<Task>>,
 }
 
 impl<T: Clone> MultiQueue<T> {
@@ -78,9 +116,13 @@ impl<T: Clone> MultiQueue<T> {
         MultiQueue::new_with(_capacity, BlockingWait::new())
     }
 
-    pub fn new_with<W: Wait + 'static>(_capacity: Index,
+    pub fn new_with<W: Wait + 'static>(capacity: Index,
                                        wait: W)
                                        -> (MultiWriter<T>, MultiReader<T>) {
+        MultiQueue::new_internal(capacity, Arc::new(wait))
+    }
+
+    fn new_internal(_capacity: Index, wait: Arc<Wait>) -> (MultiWriter<T>, MultiReader<T>) {
         let capacity = get_valid_wrap(_capacity);
         let queuedat = alloc::allocate(capacity as usize);
         unsafe {
@@ -103,7 +145,7 @@ impl<T: Clone> MultiQueue<T> {
             tail: cursor,
             data: queuedat,
             capacity: capacity as isize,
-            waiter: Box::new(wait),
+            waiter: wait,
             needs_notify: needs_notify,
             d3: unsafe { mem::uninitialized() },
 
@@ -124,6 +166,7 @@ impl<T: Clone> MultiQueue<T> {
             queue: qarc.clone(),
             reader: reader,
             token: qarc.manager.get_token(),
+            alive: true,
         };
 
         (mwriter, mreader)
@@ -346,7 +389,7 @@ impl<T: Clone> MultiReader<T> {
                 Err((pt, TryRecvError::Empty)) => {
                     let count = self.reader.load_count(Relaxed);
                     unsafe {
-                        self.queue.waiter.wait(count, &*pt);
+                        self.queue.waiter.wait(count, &*pt, &self.queue.writers);
                     }
                 }
             }
@@ -359,6 +402,7 @@ impl<T: Clone> MultiReader<T> {
             queue: self.queue.clone(),
             reader: self.queue.tail.add_reader(&self.reader, &self.queue.manager),
             token: self.queue.manager.get_token(),
+            alive: true,
         }
     }
 
@@ -408,6 +452,21 @@ impl<T: Clone> MultiReader<T> {
     pub fn unsubscribe(self) -> bool {
         self.reader.get_consumers() == 1
     }
+
+    /// Runs the passed function after unsubscribing the reader from the queue
+    fn do_unsubscribe_with<F: FnOnce()>(&mut self, f: F) {
+        if self.alive {
+            self.alive = false;
+            if self.reader.remove_consumer() == 1 {
+                if self.queue.tail.remove_reader(&self.reader, &self.queue.manager) {
+                    self.queue.manager.signal.set_reader(SeqCst);
+                }
+                self.queue.manager.remove_token(self.token);
+            }
+            fence(SeqCst);
+            f()
+        }
+    }
 }
 
 impl<T: Clone + Sync> SingleReader<T> {
@@ -442,7 +501,7 @@ impl<T: Clone + Sync> SingleReader<T> {
                     op = o;
                     let count = self.reader.reader.load_count(Relaxed);
                     unsafe {
-                        self.reader.queue.waiter.wait(count, &*pt);
+                        self.reader.queue.waiter.wait(count, &*pt, &self.reader.queue.writers);
                     }
                 }
             }
@@ -461,7 +520,7 @@ impl<T: Clone + Sync> SingleReader<T> {
     /// use multiqueue::multiqueue;
     /// let (_, mreader) = multiqueue::<usize>(6);
     /// let sreader = mreader.into_single().unwrap();
-    /// let mreader2 = sreader.into_multi();
+    /// let _mreader2 = sreader.into_multi();
     /// // Can't use sreader anymore!
     /// // mreader.try_recv_view(|x| x+1) doesn't work since multireader can't do view methods
     ///
@@ -476,6 +535,227 @@ impl<T: Clone + Sync> SingleReader<T> {
         self.reader.unsubscribe()
     }
 }
+
+impl<T: Clone> FuturesMultiWriter<T> {
+    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
+        self.writer.try_send(val)
+    }
+
+    pub fn unsubscribe(self) {
+        self.writer.unsubscribe()
+    }
+}
+
+impl<T: Clone> FuturesMultiReader<T> {
+    /// Identical to MultiReader::try_recv()
+    #[inline(always)]
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.reader.try_recv()
+    }
+
+    pub fn add_reader(&self) -> FuturesMultiReader<T> {
+        let rx = self.reader.add_reader();
+        FuturesMultiReader {
+            reader: rx,
+            wait: self.wait.clone(),
+            prod_wait: self.prod_wait.clone(),
+        }
+    }
+
+    pub fn unsubscribe(self) -> bool {
+        self.reader.reader.get_consumers() == 1
+    }
+}
+
+//////// Futures stream/sink implementations
+
+// The mpsc SendError struct can't be constructed according to rustc
+// since it's a struct and the ctor is private. Copied and pasted here
+
+/// Error type for sending, used when the receiving end of the channel is
+/// dropped
+pub struct SendError<T>(T);
+
+impl<T> fmt::Debug for SendError<T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_tuple("SendError")
+            .field(&"...")
+            .finish()
+    }
+}
+
+impl<T> fmt::Display for SendError<T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "send failed because receiver is gone")
+    }
+}
+
+impl<T> Error for SendError<T>
+    where T: Any
+{
+    fn description(&self) -> &str {
+        "send failed because receiver is gone"
+    }
+}
+
+impl<T> SendError<T> {
+    /// Returns the message that was attempted to be sent but failed.
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+
+
+impl<T: Clone> Sink for FuturesMultiWriter<T> {
+    type SinkItem = T;
+    type SinkError = SendError<T>;
+
+    fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
+
+        match self.prod_wait.send_or_park(|m| self.writer.try_send(m), msg) {
+            Ok(_) => Ok(AsyncSink::Ready),
+            Err(TrySendError::Full(msg)) => Ok(AsyncSink::NotReady(msg)),
+            Err(TrySendError::Disconnected(msg)) => Err(SendError(msg)),
+        }
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
+        Ok(Async::Ready(()))
+    }
+}
+
+impl<T: Clone> Stream for FuturesMultiReader<T> {
+    type Item = T;
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<T>, ()> {
+        self.reader.examine_signals();
+        loop {
+            match self.reader.queue.try_recv(&self.reader.reader) {
+                Ok(msg) => {
+                    self.prod_wait.notify();
+                    return Ok(Async::Ready(Some(msg)));
+                }
+                Err((_, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
+                Err((pt, _)) => {
+                    let count = self.reader.reader.load_count(Relaxed);
+                    if unsafe { self.wait.fut_wait(count, &*pt, &self.reader.queue.writers) } {
+                        return Ok(Async::NotReady);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// FuturesWait
+
+impl FuturesWait {
+    pub fn new() -> FuturesWait {
+        FuturesWait::with_spins(DEFAULT_TRY_SPINS, DEFAULT_YIELD_SPINS)
+    }
+
+    pub fn with_spins(spins_first: usize, spins_yield: usize) -> FuturesWait {
+        FuturesWait {
+            spins_first: spins_first,
+            spins_yield: spins_yield,
+            parked: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn fut_wait(&self, seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
+        self.spin(seq, at, wc) && self.park(seq, at, wc)
+    }
+
+    pub fn spin(&self, seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
+        for _ in 0..self.spins_first {
+            if check(seq, at, wc) {
+                return false;
+            }
+        }
+
+        for _ in 0..self.spins_yield {
+            yield_now();
+            if check(seq, at, wc) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn park(&self, seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
+        let mut parked = self.parked.lock();
+        if check(seq, at, wc) {
+            return false;
+        }
+        parked.push(park());
+        return true;
+    }
+
+    fn send_or_park<T: Clone, F: Fn(T) -> Result<(), TrySendError<T>>>
+        (&self,
+         f: F,
+         mut val: T)
+         -> Result<(), TrySendError<T>> {
+        for _ in 0..self.spins_first {
+            match f(val) {
+                Err(TrySendError::Full(v)) => val = v,
+                v @ _ => return v,
+            }
+        }
+
+        for _ in 0..self.spins_yield {
+            yield_now();
+            match f(val) {
+                Err(TrySendError::Full(v)) => val = v,
+                v @ _ => return v,
+            }
+        }
+
+        let mut parked = self.parked.lock();
+        match f(val) {
+            Err(TrySendError::Full(v)) => {
+                parked.push(park());
+                return Err(TrySendError::Full(v));
+            }
+            v @ _ => return v,
+        }
+    }
+}
+
+impl Wait for FuturesWait {
+    #[cold]
+    fn wait(&self, _seq: usize, _w_pos: &AtomicUsize, _wc: &AtomicUsize) {
+        assert!(false, "Somehow normal wait got called in futures queue");
+    }
+
+    fn notify(&self) {
+        let mut parked = self.parked.lock();
+        if parked.len() > 0 {
+            if parked.len() > 8 {
+                for val in parked.drain(..) {
+                    val.unpark();
+                }
+            } else {
+                let mut inline_v = smallvec::SmallVec::<[Task; 9]>::new();
+                inline_v.extend(parked.drain(..));
+                {
+                    let _destruct = parked;
+                }
+                for val in inline_v.drain() {
+                    val.unpark();
+                }
+            }
+        }
+    }
+
+    fn needs_notify(&self) -> bool {
+        true
+    }
+}
+
+//////// Clone implementations
 
 impl<T: Clone> Clone for MultiWriter<T> {
     /// Clones the writer, allowing multiple writers to push into the queue
@@ -510,25 +790,31 @@ impl<T: Clone> Clone for MultiReader<T> {
             queue: self.queue.clone(),
             reader: self.reader,
             token: self.queue.manager.get_token(),
+            alive: true,
         }
     }
 }
 
+impl Clone for FuturesWait {
+    fn clone(&self) -> FuturesWait {
+        FuturesWait::with_spins(self.spins_first, self.spins_yield)
+    }
+}
+
+//////// Drop implementations
+
 impl<T: Clone> Drop for MultiWriter<T> {
     fn drop(&mut self) {
         self.queue.writers.fetch_sub(1, SeqCst);
+        fence(SeqCst);
         self.queue.manager.remove_token(self.token);
+        self.queue.waiter.notify();
     }
 }
 
 impl<T: Clone> Drop for MultiReader<T> {
     fn drop(&mut self) {
-        if self.reader.remove_consumer() == 1 {
-            if self.queue.tail.remove_reader(&self.reader, &self.queue.manager) {
-                self.queue.manager.signal.set_reader(SeqCst);
-            }
-            self.queue.manager.remove_token(self.token);
-        }
+        self.do_unsubscribe_with(|| ())
     }
 }
 
@@ -545,6 +831,13 @@ impl<T: Clone> Drop for MultiQueue<T> {
                 }
             }
         }
+    }
+}
+
+impl<T: Clone> Drop for FuturesMultiReader<T> {
+    fn drop(&mut self) {
+        let prod_wait = self.prod_wait.clone();
+        self.reader.do_unsubscribe_with(|| { prod_wait.notify(); })
     }
 }
 
@@ -568,6 +861,24 @@ pub fn multiqueue_with<T: Clone, W: Wait + 'static>(capacity: Index,
                                                     wait: W)
                                                     -> (MultiWriter<T>, MultiReader<T>) {
     MultiQueue::new_with(capacity, wait)
+}
+
+pub fn futures_multiqueue<T: Clone>(capacity: Index)
+                                    -> (FuturesMultiWriter<T>, FuturesMultiReader<T>) {
+    let cons_arc = Arc::new(FuturesWait::new());
+    let prod_arc = Arc::new(FuturesWait::new());
+    let (tx, rx) = MultiQueue::new_internal(capacity, cons_arc.clone());
+    let ftx = FuturesMultiWriter {
+        writer: tx,
+        wait: cons_arc.clone(),
+        prod_wait: prod_arc.clone(),
+    };
+    let rtx = FuturesMultiReader {
+        reader: rx,
+        wait: cons_arc.clone(),
+        prod_wait: prod_arc.clone(),
+    };
+    (ftx, rtx)
 }
 
 #[cfg(test)]
