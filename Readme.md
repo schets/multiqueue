@@ -1,3 +1,5 @@
+# MultiQueue: Fast MPMC Multicast Queue
+
 [![Build Status](https://travis-ci.org/schets/multiqueue.svg?branch=master)](https://travis-ci.org/schets/multiqueue)
 
 Multiqueue is a general purpose lockless multi producer multiconsumer queue with broadcast capabilities.
