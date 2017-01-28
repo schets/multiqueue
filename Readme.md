@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/schets/multiqueue.svg?branch=master)](https://travis-ci.org/schets/multiqueue)
+
 Multiqueue is a general purpose lockless multi producer multiconsumer queue with broadcast capabilities.
 It has fast fallbacks for whenever there's a single consumer and/or a single producer (detects switches at runtime!) so it can effectively serve for all your queue cases.
 

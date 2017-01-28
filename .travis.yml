@@ -10,5 +10,5 @@ script:
   - |
       cargo build &&
       cargo test &&
-      cargo test -- --release &&
-      cargo --only stable doc
+      cargo test --release &&
+      cargo doc
