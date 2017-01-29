@@ -9,5 +9,5 @@ mod multiqueue;
 mod read_cursor;
 pub mod wait;
 
-pub use multiqueue::{multiqueue, multiqueue_with, MultiReader, SingleReader, MultiWriter,
-                     FuturesMultiReader, FuturesMultiWriter, futures_multiqueue};
+pub use multiqueue::{multiqueue, multiqueue_with, Receiver, SingleReceiver, Sender,
+                     FuturesReceiver, FuturesSender, futures_multiqueue};

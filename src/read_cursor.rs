@@ -135,7 +135,7 @@ impl ReaderGroup {
     }
 
     /// Only safe to call from a consumer of the queue!
-    pub unsafe fn add_reader(&self, raw: usize, wrap: Index) -> (*mut ReaderGroup, Reader) {
+    pub unsafe fn add_receiver(&self, raw: usize, wrap: Index) -> (*mut ReaderGroup, Reader) {
         let new_meta = alloc::allocate(1);
         let new_group = alloc::allocate(1);
         let new_pos = alloc::allocate(1);
@@ -189,7 +189,7 @@ impl ReadCursor {
     pub fn new(wrap: Index) -> (ReadCursor, Reader) {
         let rg = ReaderGroup::new();
         unsafe {
-            let (real_group, reader) = rg.add_reader(0, wrap);
+            let (real_group, reader) = rg.add_receiver(0, wrap);
             (ReadCursor { readers: AtomicPtr::new(real_group) }, reader)
         }
     }
@@ -213,7 +213,7 @@ impl ReadCursor {
                 // We must first read the diff, *and then* check the pointer
                 // for changes.
                 //
-                // We can also get away with having a writer change this during 
+                // We can also get away with having a writer change this during
                 // the load as long as it doesn't finish the change since the
                 // reader doing the change is pinned to the same spot. It's basically
                 // like a seqlock where only the final check is needed and not the first
@@ -231,17 +231,20 @@ impl ReadCursor {
         }
     }
 
-    pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> Reader {
+    pub fn add_receiver(&self, reader: &Reader, manager: &MemoryManager) -> Reader {
         let mut current_ptr = self.readers.load(CONSUME);
         loop {
             unsafe {
                 let current_group = &*current_ptr;
                 let raw = (*reader.pos).pos_data.load_raw(Ordering::Relaxed);
                 let wrap = (*reader.pos).pos_data.wrap_at();
-                let (new_group, new_reader) = current_group.add_reader(raw, wrap);
+                let (new_group, new_reader) = current_group.add_receiver(raw, wrap);
                 fence(Ordering::SeqCst);
                 match self.readers
-                    .compare_exchange(current_ptr, new_group, Ordering::Relaxed, Ordering::Relaxed) {
+                    .compare_exchange(current_ptr,
+                                      new_group,
+                                      Ordering::Relaxed,
+                                      Ordering::Relaxed) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         manager.free(current_ptr, 1);

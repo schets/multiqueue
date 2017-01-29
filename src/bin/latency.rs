@@ -2,7 +2,7 @@ extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
-use multiqueue::{MultiReader, MultiWriter, multiqueue};
+use multiqueue::{Receiver, Sender, multiqueue};
 
 use crossbeam::scope;
 
@@ -21,7 +21,7 @@ fn waste_50_ns(val: &AtomicUsize) {
     fence(Ordering::SeqCst);
 }
 
-fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
+fn recv(bar: &Barrier, reader: Receiver<Option<u64>>) {
     let mut total_time = 0;
     let mut succ = 0;
     let tries = 10000;
@@ -57,7 +57,7 @@ fn recv(bar: &Barrier, reader: MultiReader<Option<u64>>) {
     }
 }
 
-fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize, num_us: usize) {
+fn send(bar: &Barrier, writer: Sender<Option<u64>>, num_push: usize, num_us: usize) {
     bar.wait();
     let val: AtomicUsize = AtomicUsize::new(0);
     for _ in 0..num_push {

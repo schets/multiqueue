@@ -233,7 +233,7 @@ mod test {
             }
             writer.unsubscribe();
             for _ in 0..receivers {
-                let this_reader = reader.add_reader().into_single().unwrap();
+                let this_reader = reader.add_receiver().into_single().unwrap();
                 scope.spawn(move || {
                     let mut myv = Vec::new();
                     for _ in 0..senders {

@@ -14,8 +14,8 @@ fn is_send<T: Send>() {}
 
 #[test]
 fn bounds() {
-    is_send::<multiqueue::FuturesMultiWriter<i32>>();
-    is_send::<multiqueue::FuturesMultiReader<i32>>();
+    is_send::<multiqueue::FuturesSender<i32>>();
+    is_send::<multiqueue::FuturesReceiver<i32>>();
 }
 
 #[test]

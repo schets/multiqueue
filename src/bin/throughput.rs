@@ -2,58 +2,83 @@ extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
-use multiqueue::{MultiReader, MultiWriter, multiqueue_with, wait};
+use multiqueue::{Receiver, Sender, multiqueue_with, wait};
 
 use time::precise_time_ns;
 
 use crossbeam::scope;
 
 use std::sync::Barrier;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn recv(bar: &Barrier, mreader: MultiReader<Option<u64>>) -> u64 {
+#[inline(never)]
+fn recv(bar: &Barrier, mreader: Receiver<u64>, sum: &AtomicUsize, check: bool) {
     let reader = mreader.into_single().unwrap();
     bar.wait();
     let start = precise_time_ns();
     let mut cur = 0; 
     loop {
-            match reader.recv().unwrap() {
-                None => break,
-                Some(pushed) => {
+            match reader.recv() {
+                Ok(pushed) => {
                     if cur != pushed {
-                        panic!("Dang");
+                        if check {
+                            panic!("Got {}, expected {}", pushed, cur);
+                        }
                     }
                     cur += 1;
-                }
+                },
+                Err(_) => break,
             }
     }
 
-    precise_time_ns() - start
+    sum.fetch_add((precise_time_ns() - start) as usize, Ordering::SeqCst);
 }
 
-fn send(bar: &Barrier, writer: MultiWriter<Option<u64>>, num_push: usize) {
+fn send(bar: &Barrier, writer: Sender<u64>, num_push: usize) {
     bar.wait();
     for i in 0..num_push as u64 {
         loop {
-            let topush = Some(i);
+            let topush = i;
             if let Ok(_) =  writer.try_send(topush) {
                 break;
             }
         }
     }
-    while let Err(_) = writer.try_send(None) {}
+}
+
+fn runit(name: &str, n_senders: usize, n_readers: usize) {
+    let num_do = 100000000;
+    let (writer, reader) = multiqueue_with(20000, wait::BusyWait::new());
+    let bar = Barrier::new(1 + n_senders + n_readers);
+    let bref = &bar;
+    let ns_atomic = AtomicUsize::new(0);
+    scope(|scope| {
+        for _ in 0..n_senders {
+            let w = writer.clone();
+            scope.spawn(move || {
+                send(bref, w, num_do);
+            });
+        }
+        writer.unsubscribe();
+        for _ in 0..n_readers {
+            let aref = &ns_atomic;
+            let r = reader.add_receiver();
+            let check = n_senders == 1;
+            scope.spawn(move || {
+                recv(bref, r, aref, check);
+            });
+        }
+        reader.unsubscribe();
+        bar.wait();
+    });
+    let ns_spent = (ns_atomic.load(Ordering::Relaxed) as f64) / n_readers as f64;
+    let ns_per_item = ns_spent / (num_do as f64);
+    println!("Time spent doing {} push/pop pairs for {} was {} ns per item", num_do, name, ns_per_item);
 }
 
 fn main() {
-    let num_do = 10000000;
-    let (writer, reader) = multiqueue_with(20000, wait::YieldingWait::new());
-    let bar = Barrier::new(2);
-    let bref = &bar;
-    scope(|scope| {
-        scope.spawn(move || {
-            send(bref, writer, num_do);
-        });
-        let ns_spent = recv(bref, reader) as f64;
-        let ns_per_item = ns_spent / (num_do as f64);
-        println!("Time spent doing {} push/pop pairs (without waiting on the popped result!) was {} ns per item", num_do, ns_per_item);
-    });
+    runit("1p::1c", 1, 1);
+    runit("1p::1c_2b", 1, 2);
+    runit("2p::1c", 2, 1);
+    runit("2p::1c_2b", 2, 2);
 }

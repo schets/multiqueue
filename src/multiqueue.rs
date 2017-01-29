@@ -42,7 +42,7 @@ struct QueueEntry<T> {
 /// A bounded queue that supports multiple reader and writers
 /// and supports effecient methods for single consumers and producers
 #[repr(C)]
-pub struct MultiQueue<T: Clone> {
+struct MultiQueue<T: Clone> {
     d1: [u8; 64],
 
     // Writer data
@@ -67,39 +67,39 @@ pub struct MultiQueue<T: Clone> {
     d4: [u8; 64],
 }
 
-pub struct MultiWriter<T: Clone> {
+pub struct Sender<T: Clone> {
     queue: Arc<MultiQueue<T>>,
     token: *const MemToken,
     state: Cell<QueueState>,
 }
 
-pub struct MultiReader<T: Clone> {
+pub struct Receiver<T: Clone> {
     queue: Arc<MultiQueue<T>>,
     reader: Reader,
     token: *const MemToken,
     alive: bool,
 }
 
-pub struct SingleReader<T: Clone> {
-    reader: MultiReader<T>,
+pub struct SingleReceiver<T: Clone> {
+    reader: Receiver<T>,
 }
 
 #[derive(Clone)]
-pub struct FuturesMultiWriter<T: Clone> {
-    writer: MultiWriter<T>,
+pub struct FuturesSender<T: Clone> {
+    writer: Sender<T>,
     wait: Arc<FuturesWait>,
     prod_wait: Arc<FuturesWait>,
 }
 
 #[derive(Clone)]
-pub struct FuturesMultiReader<T: Clone> {
-    reader: MultiReader<T>,
+pub struct FuturesReceiver<T: Clone> {
+    reader: Receiver<T>,
     wait: Arc<FuturesWait>,
     prod_wait: Arc<FuturesWait>,
 }
 
-pub struct FuturesSingleReader<R, F: FnMut(&T) -> R, T: Clone> {
-    reader: SingleReader<T>,
+pub struct FuturesSingleReceiver<R, F: FnMut(&T) -> R, T: Clone> {
+    reader: SingleReceiver<T>,
     wait: Arc<FuturesWait>,
     prod_wait: Arc<FuturesWait>,
     op: F,
@@ -112,17 +112,15 @@ struct FuturesWait {
 }
 
 impl<T: Clone> MultiQueue<T> {
-    pub fn new(_capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
+    pub fn new(_capacity: Index) -> (Sender<T>, Receiver<T>) {
         MultiQueue::new_with(_capacity, BlockingWait::new())
     }
 
-    pub fn new_with<W: Wait + 'static>(capacity: Index,
-                                       wait: W)
-                                       -> (MultiWriter<T>, MultiReader<T>) {
+    pub fn new_with<W: Wait + 'static>(capacity: Index, wait: W) -> (Sender<T>, Receiver<T>) {
         MultiQueue::new_internal(capacity, Arc::new(wait))
     }
 
-    fn new_internal(_capacity: Index, wait: Arc<Wait>) -> (MultiWriter<T>, MultiReader<T>) {
+    fn new_internal(_capacity: Index, wait: Arc<Wait>) -> (Sender<T>, Receiver<T>) {
         let capacity = get_valid_wrap(_capacity);
         let queuedat = alloc::allocate(capacity as usize);
         unsafe {
@@ -156,13 +154,13 @@ impl<T: Clone> MultiQueue<T> {
 
         let qarc = Arc::new(queue);
 
-        let mwriter = MultiWriter {
+        let mwriter = Sender {
             queue: qarc.clone(),
             state: Cell::new(QueueState::Single),
             token: qarc.manager.get_token(),
         };
 
-        let mreader = MultiReader {
+        let mreader = Receiver {
             queue: qarc.clone(),
             reader: reader,
             token: qarc.manager.get_token(),
@@ -211,9 +209,6 @@ impl<T: Clone> MultiQueue<T> {
                         };
                         ptr::write(&mut write_cell.val, val);
                         write_cell.wraps.store(wrap_valid_tag, Release);
-                        if self.needs_notify {
-                            self.waiter.notify();
-                        }
                         return Ok(());
                     }
                 }
@@ -243,9 +238,6 @@ impl<T: Clone> MultiQueue<T> {
             };
             ptr::write(&mut write_cell.val, val);
             write_cell.wraps.store(wrap_valid_tag, Release);
-            if self.needs_notify {
-                self.waiter.notify();
-            }
             Ok(())
         }
     }
@@ -333,7 +325,7 @@ impl<T: Clone> MultiQueue<T> {
     }
 }
 
-impl<T: Clone> MultiWriter<T> {
+impl<T: Clone> Sender<T> {
     #[inline(always)]
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
         let signal = self.queue.manager.signal.load(Relaxed);
@@ -343,7 +335,7 @@ impl<T: Clone> MultiWriter<T> {
                 return Err(TrySendError::Full(val));
             }
         }
-        match self.state.get() {
+        let val = match self.state.get() {
             QueueState::Single => self.queue.try_send_single(val),
             QueueState::Multi => {
                 if self.queue.writers.load(Relaxed) == 1 {
@@ -354,7 +346,16 @@ impl<T: Clone> MultiWriter<T> {
                     self.queue.try_send_multi(val)
                 }
             }
+        };
+        // Putting this in the send functions
+        // greatly confuses the compiler and literally halfs
+        // the performance of the queue
+        if val.is_ok() {
+            if self.queue.needs_notify {
+                self.queue.waiter.notify();
+            }
         }
+        val
     }
 
     /// Removes the writer as a producer to the queue
@@ -369,7 +370,7 @@ impl<T: Clone> MultiWriter<T> {
     }
 }
 
-impl<T: Clone> MultiReader<T> {
+impl<T: Clone> Receiver<T> {
     /// Tries to receive a value from the queue without blocking.
     #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -396,19 +397,19 @@ impl<T: Clone> MultiReader<T> {
         }
     }
 
-    pub fn add_reader(&self) -> MultiReader<T> {
-        MultiReader {
+    pub fn add_receiver(&self) -> Receiver<T> {
+        Receiver {
             queue: self.queue.clone(),
-            reader: self.queue.tail.add_reader(&self.reader, &self.queue.manager),
+            reader: self.queue.tail.add_receiver(&self.reader, &self.queue.manager),
             token: self.queue.manager.get_token(),
             alive: true,
         }
     }
 
-    pub fn into_single(self) -> Result<SingleReader<T>, MultiReader<T>> {
+    pub fn into_single(self) -> Result<SingleReceiver<T>, Receiver<T>> {
         if self.reader.get_consumers() == 1 {
             fence(Acquire);
-            Ok(SingleReader { reader: self })
+            Ok(SingleReceiver { reader: self })
         } else {
             Err(self)
         }
@@ -438,7 +439,7 @@ impl<T: Clone> MultiReader<T> {
     /// ```
     /// use multiqueue::multiqueue;
     /// let (writer, reader) = multiqueue(1);
-    /// let reader_2_1 = reader.add_reader();
+    /// let reader_2_1 = reader.add_receiver();
     /// let reader_2_2 = reader_2_1.clone();
     /// writer.try_send(1).expect("This will succeed since queue is empty");
     /// reader.try_recv().expect("This reader can read");
@@ -468,8 +469,8 @@ impl<T: Clone> MultiReader<T> {
     }
 }
 
-impl<T: Clone + Sync> SingleReader<T> {
-    /// Identical to MultiReader::try_recv()
+impl<T: Clone + Sync> SingleReceiver<T> {
+    /// Identical to Receiver::try_recv()
     #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.reader.try_recv()
@@ -506,12 +507,12 @@ impl<T: Clone + Sync> SingleReader<T> {
         }
     }
 
-    pub fn add_reader(&self) -> SingleReader<T> {
-        self.reader.add_reader().into_single().unwrap()
+    pub fn add_receiver(&self) -> SingleReceiver<T> {
+        self.reader.add_receiver().into_single().unwrap()
     }
 
 
-    /// Transforms the SingleReader into a MultiReader
+    /// Transforms the SingleReceiver into a Receiver
     ///
     /// # Examples
     ///
@@ -525,17 +526,17 @@ impl<T: Clone + Sync> SingleReader<T> {
     ///
     ///
     /// ```
-    pub fn into_multi(self) -> MultiReader<T> {
+    pub fn into_multi(self) -> Receiver<T> {
         self.reader
     }
 
-    /// See MultiReader::unsubscribe()
+    /// See Receiver::unsubscribe()
     pub fn unsubscribe(self) -> bool {
         self.reader.unsubscribe()
     }
 }
 
-impl<T: Clone> FuturesMultiWriter<T> {
+impl<T: Clone> FuturesSender<T> {
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
         self.writer.try_send(val)
     }
@@ -545,23 +546,26 @@ impl<T: Clone> FuturesMultiWriter<T> {
     }
 }
 
-impl<T: Clone> FuturesMultiReader<T> {
-    /// Identical to MultiReader::try_recv()
+impl<T: Clone> FuturesReceiver<T> {
+    /// Identical to Receiver::try_recv()
     #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.reader.try_recv()
     }
 
-    pub fn add_reader(&self) -> FuturesMultiReader<T> {
-        let rx = self.reader.add_reader();
-        FuturesMultiReader {
+    pub fn add_receiver(&self) -> FuturesReceiver<T> {
+        let rx = self.reader.add_receiver();
+        FuturesReceiver {
             reader: rx,
             wait: self.wait.clone(),
             prod_wait: self.prod_wait.clone(),
         }
     }
 
-    pub fn into_single<R, F: FnMut(&T) -> R>(self, op: F) -> Result<FuturesSingleReader<R, F, T>, (F, FuturesMultiReader<T>)> {
+    pub fn into_single<R, F: FnMut(&T) -> R>
+        (self,
+         op: F)
+         -> Result<FuturesSingleReceiver<R, F, T>, (F, FuturesReceiver<T>)> {
         let new_mreader;
         let new_pwait = self.prod_wait.clone();
         let new_wait = self.wait.clone();
@@ -571,20 +575,21 @@ impl<T: Clone> FuturesMultiReader<T> {
         }
         match new_mreader.into_single() {
             Ok(sreader) => {
-                Ok(FuturesSingleReader{
+                Ok(FuturesSingleReceiver {
                     reader: sreader,
                     wait: new_wait,
                     prod_wait: new_pwait,
                     op: op,
                 })
-            },
+            }
             Err(mreader) => {
-                Err((op, FuturesMultiReader{
-                    reader: mreader,
-                    wait: new_wait,
-                    prod_wait: new_pwait,
-                }))
-            },
+                Err((op,
+                     FuturesReceiver {
+                         reader: mreader,
+                         wait: new_wait,
+                         prod_wait: new_pwait,
+                     }))
+            }
         }
     }
 
@@ -593,7 +598,7 @@ impl<T: Clone> FuturesMultiReader<T> {
     }
 }
 
-impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReader<R, F, T> {
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReceiver<R, F, T> {
     #[inline(always)]
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
         let opref = &mut self.op;
@@ -602,9 +607,11 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReader<R, F, T> {
         rval.map_err(|x| x.1)
     }
 
-    pub fn add_reader_with<Q, FQ: FnMut(&T) -> Q>(&self, op: FQ) -> FuturesSingleReader<Q, FQ, T> {
-        let rx = self.reader.add_reader();
-        FuturesSingleReader {
+    pub fn add_receiver_with<Q, FQ: FnMut(&T) -> Q>(&self,
+                                                    op: FQ)
+                                                    -> FuturesSingleReceiver<Q, FQ, T> {
+        let rx = self.reader.add_receiver();
+        FuturesSingleReceiver {
             reader: rx,
             wait: self.wait.clone(),
             prod_wait: self.prod_wait.clone(),
@@ -614,10 +621,10 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReader<R, F, T> {
 
     pub fn transform_operation<Q, FQ: FnMut(&T) -> Q>(self,
                                                       op: FQ)
-                                                      -> FuturesSingleReader<Q, FQ, T> {
+                                                      -> FuturesSingleReceiver<Q, FQ, T> {
         // Don't know how to satisy borrowck without absurd pointer lies
-        // and forgetting shenanigans. Would rather pay the cost of add_reader for this
-        self.add_reader_with(op)
+        // and forgetting shenanigans. Would rather pay the cost of add_receiver for this
+        self.add_receiver_with(op)
     }
 
     pub fn unsubscribe(self) -> bool {
@@ -665,14 +672,20 @@ impl<T> SendError<T> {
 
 
 
-impl<T: Clone> Sink for FuturesMultiWriter<T> {
+impl<T: Clone> Sink for FuturesSender<T> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
     fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
 
         match self.prod_wait.send_or_park(|m| self.writer.try_send(m), msg) {
-            Ok(_) => Ok(AsyncSink::Ready),
+            Ok(_) => {
+                // see Sender::try_recv for why this isn't in the queue
+                if self.writer.queue.needs_notify {
+                    self.writer.queue.waiter.notify();
+                }
+                Ok(AsyncSink::Ready)
+            }
             Err(TrySendError::Full(msg)) => Ok(AsyncSink::NotReady(msg)),
             Err(TrySendError::Disconnected(msg)) => Err(SendError(msg)),
         }
@@ -683,7 +696,7 @@ impl<T: Clone> Sink for FuturesMultiWriter<T> {
     }
 }
 
-impl<T: Clone> Stream for FuturesMultiReader<T> {
+impl<T: Clone> Stream for FuturesReceiver<T> {
     type Item = T;
     type Error = ();
 
@@ -707,15 +720,18 @@ impl<T: Clone> Stream for FuturesMultiReader<T> {
     }
 }
 
-impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Stream for FuturesSingleReader<R, F, T> {
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Stream for FuturesSingleReceiver<R, F, T> {
     type Item = R;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<R>, ()> {
         self.reader.reader.examine_signals();
         loop {
-        let opref = &mut self.op;
-            match self.reader.reader.queue.try_recv_view(|tr| opref(tr), &self.reader.reader.reader) {
+            let opref = &mut self.op;
+            match self.reader
+                .reader
+                .queue
+                .try_recv_view(|tr| opref(tr), &self.reader.reader.reader) {
                 Ok(msg) => {
                     self.prod_wait.notify();
                     return Ok(Async::Ready(Some(msg)));
@@ -843,7 +859,7 @@ impl Wait for FuturesWait {
 
 //////// Clone implementations
 
-impl<T: Clone> Clone for MultiWriter<T> {
+impl<T: Clone> Clone for Sender<T> {
     /// Clones the writer, allowing multiple writers to push into the queue
     /// from different threads
     /// # Examples
@@ -857,9 +873,9 @@ impl<T: Clone> Clone for MultiWriter<T> {
     /// assert_eq!(1, reader.try_recv().unwrap());
     /// assert_eq!(2, reader.try_recv().unwrap());
     /// ```
-    fn clone(&self) -> MultiWriter<T> {
+    fn clone(&self) -> Sender<T> {
         self.state.set(QueueState::Multi);
-        let rval = MultiWriter {
+        let rval = Sender {
             queue: self.queue.clone(),
             state: Cell::new(QueueState::Multi),
             token: self.queue.manager.get_token(),
@@ -869,10 +885,10 @@ impl<T: Clone> Clone for MultiWriter<T> {
     }
 }
 
-impl<T: Clone> Clone for MultiReader<T> {
-    fn clone(&self) -> MultiReader<T> {
+impl<T: Clone> Clone for Receiver<T> {
+    fn clone(&self) -> Receiver<T> {
         self.reader.dup_consumer();
-        MultiReader {
+        Receiver {
             queue: self.queue.clone(),
             reader: self.reader,
             token: self.queue.manager.get_token(),
@@ -889,7 +905,7 @@ impl Clone for FuturesWait {
 
 //////// Drop implementations
 
-impl<T: Clone> Drop for MultiWriter<T> {
+impl<T: Clone> Drop for Sender<T> {
     fn drop(&mut self) {
         self.queue.writers.fetch_sub(1, SeqCst);
         fence(SeqCst);
@@ -898,7 +914,7 @@ impl<T: Clone> Drop for MultiWriter<T> {
     }
 }
 
-impl<T: Clone> Drop for MultiReader<T> {
+impl<T: Clone> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.do_unsubscribe_with(|| ())
     }
@@ -920,14 +936,14 @@ impl<T: Clone> Drop for MultiQueue<T> {
     }
 }
 
-impl<T: Clone> Drop for FuturesMultiReader<T> {
+impl<T: Clone> Drop for FuturesReceiver<T> {
     fn drop(&mut self) {
         let prod_wait = self.prod_wait.clone();
         self.reader.do_unsubscribe_with(|| { prod_wait.notify(); })
     }
 }
 
-impl<R, F: FnMut(&T) -> R, T: Clone> Drop for FuturesSingleReader<R, F, T> {
+impl<R, F: FnMut(&T) -> R, T: Clone> Drop for FuturesSingleReceiver<R, F, T> {
     fn drop(&mut self) {
         let prod_wait = self.prod_wait.clone();
         self.reader.reader.do_unsubscribe_with(|| { prod_wait.notify(); })
@@ -935,7 +951,7 @@ impl<R, F: FnMut(&T) -> R, T: Clone> Drop for FuturesSingleReader<R, F, T> {
 }
 
 
-impl<T: Clone> fmt::Debug for MultiReader<T> {
+impl<T: Clone> fmt::Debug for Receiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Multireader generic error message!")
     }
@@ -943,31 +959,30 @@ impl<T: Clone> fmt::Debug for MultiReader<T> {
 
 unsafe impl<T: Clone> Sync for MultiQueue<T> {}
 unsafe impl<T: Clone> Send for MultiQueue<T> {}
-unsafe impl<T: Send + Clone> Send for MultiWriter<T> {}
-unsafe impl<T: Send + Clone> Send for MultiReader<T> {}
-unsafe impl<T: Send + Clone> Send for SingleReader<T> {}
+unsafe impl<T: Send + Clone> Send for Sender<T> {}
+unsafe impl<T: Send + Clone> Send for Receiver<T> {}
+unsafe impl<T: Send + Clone> Send for SingleReceiver<T> {}
 
-pub fn multiqueue<T: Clone>(capacity: Index) -> (MultiWriter<T>, MultiReader<T>) {
+pub fn multiqueue<T: Clone>(capacity: Index) -> (Sender<T>, Receiver<T>) {
     MultiQueue::new(capacity)
 }
 
 pub fn multiqueue_with<T: Clone, W: Wait + 'static>(capacity: Index,
                                                     wait: W)
-                                                    -> (MultiWriter<T>, MultiReader<T>) {
+                                                    -> (Sender<T>, Receiver<T>) {
     MultiQueue::new_with(capacity, wait)
 }
 
-pub fn futures_multiqueue<T: Clone>(capacity: Index)
-                                    -> (FuturesMultiWriter<T>, FuturesMultiReader<T>) {
+pub fn futures_multiqueue<T: Clone>(capacity: Index) -> (FuturesSender<T>, FuturesReceiver<T>) {
     let cons_arc = Arc::new(FuturesWait::new());
     let prod_arc = Arc::new(FuturesWait::new());
     let (tx, rx) = MultiQueue::new_internal(capacity, cons_arc.clone());
-    let ftx = FuturesMultiWriter {
+    let ftx = FuturesSender {
         writer: tx,
         wait: cons_arc.clone(),
         prod_wait: prod_arc.clone(),
     };
-    let rtx = FuturesMultiReader {
+    let rtx = FuturesReceiver {
         reader: rx,
         wait: cons_arc.clone(),
         prod_wait: prod_arc.clone(),
@@ -1027,7 +1042,7 @@ mod test {
             }
             writer.unsubscribe();
             for _ in 0..receivers {
-                let this_reader = reader.add_reader().into_single().unwrap();
+                let this_reader = reader.add_receiver().into_single().unwrap();
                 scope.spawn(move || {
                     let mut myv = Vec::new();
                     for _ in 0..senders {
@@ -1080,7 +1095,7 @@ mod test {
     fn test_remove_reader() {
         let (writer, reader) = MultiQueue::<usize>::new(1);
         assert!(writer.try_send(1).is_ok());
-        let reader_2 = reader.add_reader();
+        let reader_2 = reader.add_receiver();
         assert!(writer.try_send(1).is_err());
         assert_eq!(1, reader.try_recv().unwrap());
         assert!(reader.try_recv().is_err());
@@ -1120,7 +1135,7 @@ mod test {
             }
             writer.unsubscribe();
             for _ in 0..receivers {
-                let _this_reader = reader.add_reader();
+                let _this_reader = reader.add_receiver();
                 for _ in 0..nclone {
                     let this_reader = _this_reader.clone();
                     scope.spawn(move || {
