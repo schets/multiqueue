@@ -211,25 +211,26 @@ impl ReadCursor {
                 let rval = rg.get_max_diff(cur_writer);
                 // This check ensures that the pointer hasn't changed
                 // We must first read the diff, *and then* check the pointer
-                // for changes. This is extremely similar to the seqlock except
-                // with the pointer as the sequence lock instead of a different int
+                // for changes.
+                //
+                // We can also get away with having a writer change this during 
+                // the load as long as it doesn't finish the change since the
+                // reader doing the change is pinned to the same spot. It's basically
+                // like a seqlock where only the final check is needed and not the first
+                // since the data remains valid throughout the write cycle
                 //
                 // We don't need another acquire fence here since the
                 // relevant loads in get_max_diff are going to ordered
                 // before all loads after the function exit, and also
                 // ordered after the original pointer load
-                let second_ptr = self.readers.load(MAYBE_ACQUIRE);
+                let second_ptr = self.readers.load(Ordering::Relaxed);
                 if second_ptr == first_ptr {
-                    maybe_acquire_fence();
                     return rval;
                 }
             }
         }
     }
 
-    // There's no fundamental reason these need to leak,
-    // I just haven't implemented the memory management yet.
-    // It's not too hard since we can track readers and writers active
     pub fn add_reader(&self, reader: &Reader, manager: &MemoryManager) -> Reader {
         let mut current_ptr = self.readers.load(CONSUME);
         loop {
@@ -238,8 +239,9 @@ impl ReadCursor {
                 let raw = (*reader.pos).pos_data.load_raw(Ordering::Relaxed);
                 let wrap = (*reader.pos).pos_data.wrap_at();
                 let (new_group, new_reader) = current_group.add_reader(raw, wrap);
+                fence(Ordering::SeqCst);
                 match self.readers
-                    .compare_exchange(current_ptr, new_group, Ordering::SeqCst, Ordering::SeqCst) {
+                    .compare_exchange(current_ptr, new_group, Ordering::Relaxed, Ordering::Relaxed) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         manager.free(current_ptr, 1);
@@ -247,6 +249,7 @@ impl ReadCursor {
                     }
                     Err(val) => {
                         current_ptr = val;
+                        fence(Ordering::Acquire);
                         ptr::read(new_group);
                         alloc::deallocate(new_reader.meta as *mut ReaderMeta, 1);
                         alloc::deallocate(new_reader.pos as *mut ReaderPos, 1);
