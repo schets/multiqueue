@@ -415,6 +415,12 @@ impl<T: Clone> Receiver<T> {
         }
     }
 
+    pub fn partial_iter<'a>(&'a self) -> RecvPartialIterator<'a, T> {
+        RecvPartialIterator {
+            reader: self,
+        }
+    }
+
     #[inline(always)]
     fn examine_signals(&self) {
         let signal = self.queue.manager.signal.load(Relaxed);
@@ -670,8 +676,6 @@ impl<T> SendError<T> {
     }
 }
 
-
-
 impl<T: Clone> Sink for FuturesSender<T> {
     type SinkItem = T;
     type SinkError = SendError<T>;
@@ -856,6 +860,56 @@ impl Wait for FuturesWait {
         true
     }
 }
+
+// Iterator Implemenatation
+
+pub struct RecvIterator<T: Clone> {
+    reader: Receiver<T>,
+}
+
+impl<T: Clone> IntoIterator for Receiver<T> {
+    type Item = T;
+    type IntoIter = RecvIterator<T>;
+
+    fn into_iter(self) -> RecvIterator<T> {
+        RecvIterator {
+            reader: self,
+        }
+    }
+}
+
+impl<T: Clone> Iterator for RecvIterator<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        match self.reader.recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<T: Clone> RecvIterator<T> {
+    pub fn get_recv(self) -> Receiver<T> {
+        self.reader
+    }
+}
+
+pub struct RecvPartialIterator<'a, T: 'a + Clone> {
+    reader: &'a Receiver<T>,
+} 
+
+impl<'a, T: 'a + Clone> Iterator for RecvPartialIterator<'a, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        match self.reader.try_recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
 
 //////// Clone implementations
 
@@ -1225,5 +1279,12 @@ mod test {
             }
         }
         assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_iterator_comp () {
+        let (writer, reader) = MultiQueue::<usize>::new(10);
+        drop(writer);
+        for _ in reader {}
     }
 }
