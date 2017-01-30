@@ -397,10 +397,10 @@ impl<T: Clone> Receiver<T> {
         }
     }
 
-    pub fn add_receiver(&self) -> Receiver<T> {
+    pub fn add_stream(&self) -> Receiver<T> {
         Receiver {
             queue: self.queue.clone(),
-            reader: self.queue.tail.add_receiver(&self.reader, &self.queue.manager),
+            reader: self.queue.tail.add_stream(&self.reader, &self.queue.manager),
             token: self.queue.manager.get_token(),
             alive: true,
         }
@@ -416,9 +416,7 @@ impl<T: Clone> Receiver<T> {
     }
 
     pub fn partial_iter<'a>(&'a self) -> RecvPartialIterator<'a, T> {
-        RecvPartialIterator {
-            reader: self,
-        }
+        RecvPartialIterator { reader: self }
     }
 
     #[inline(always)]
@@ -445,7 +443,7 @@ impl<T: Clone> Receiver<T> {
     /// ```
     /// use multiqueue::multiqueue;
     /// let (writer, reader) = multiqueue(1);
-    /// let reader_2_1 = reader.add_receiver();
+    /// let reader_2_1 = reader.add_stream();
     /// let reader_2_2 = reader_2_1.clone();
     /// writer.try_send(1).expect("This will succeed since queue is empty");
     /// reader.try_recv().expect("This reader can read");
@@ -513,8 +511,18 @@ impl<T: Clone + Sync> SingleReceiver<T> {
         }
     }
 
-    pub fn add_receiver(&self) -> SingleReceiver<T> {
-        self.reader.add_receiver().into_single().unwrap()
+    pub fn add_stream(&self) -> SingleReceiver<T> {
+        self.reader.add_stream().into_single().unwrap()
+    }
+
+    pub fn iter_with<R, F: FnMut(&T) -> R>(self, op: F) -> RecvViewIterator<R, F, T> {
+        RecvViewIterator { vals: (op, self) }
+    }
+
+    pub fn partial_iter_with<'a, R, F: FnMut(&T) -> R>(&'a self,
+                                                       op: F)
+                                                       -> RecvPartialViewIterator<'a, R, F, T> {
+        RecvPartialViewIterator { vals: (op, self) }
     }
 
 
@@ -559,8 +567,8 @@ impl<T: Clone> FuturesReceiver<T> {
         self.reader.try_recv()
     }
 
-    pub fn add_receiver(&self) -> FuturesReceiver<T> {
-        let rx = self.reader.add_receiver();
+    pub fn add_stream(&self) -> FuturesReceiver<T> {
+        let rx = self.reader.add_stream();
         FuturesReceiver {
             reader: rx,
             wait: self.wait.clone(),
@@ -613,10 +621,10 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReceiver<R, F, T> {
         rval.map_err(|x| x.1)
     }
 
-    pub fn add_receiver_with<Q, FQ: FnMut(&T) -> Q>(&self,
-                                                    op: FQ)
-                                                    -> FuturesSingleReceiver<Q, FQ, T> {
-        let rx = self.reader.add_receiver();
+    pub fn add_stream_with<Q, FQ: FnMut(&T) -> Q>(&self,
+                                                  op: FQ)
+                                                  -> FuturesSingleReceiver<Q, FQ, T> {
+        let rx = self.reader.add_stream();
         FuturesSingleReceiver {
             reader: rx,
             wait: self.wait.clone(),
@@ -629,8 +637,8 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReceiver<R, F, T> {
                                                       op: FQ)
                                                       -> FuturesSingleReceiver<Q, FQ, T> {
         // Don't know how to satisy borrowck without absurd pointer lies
-        // and forgetting shenanigans. Would rather pay the cost of add_receiver for this
-        self.add_receiver_with(op)
+        // and forgetting shenanigans. Would rather pay the cost of add_stream for this
+        self.add_stream_with(op)
     }
 
     pub fn unsubscribe(self) -> bool {
@@ -872,9 +880,7 @@ impl<T: Clone> IntoIterator for Receiver<T> {
     type IntoIter = RecvIterator<T>;
 
     fn into_iter(self) -> RecvIterator<T> {
-        RecvIterator {
-            reader: self,
-        }
+        RecvIterator { reader: self }
     }
 }
 
@@ -897,7 +903,7 @@ impl<T: Clone> RecvIterator<T> {
 
 pub struct RecvPartialIterator<'a, T: 'a + Clone> {
     reader: &'a Receiver<T>,
-} 
+}
 
 impl<'a, T: 'a + Clone> Iterator for RecvPartialIterator<'a, T> {
     type Item = T;
@@ -907,6 +913,55 @@ impl<'a, T: 'a + Clone> Iterator for RecvPartialIterator<'a, T> {
             Ok(val) => Some(val),
             Err(_) => None,
         }
+    }
+}
+
+pub struct RecvViewIterator<R, F: FnMut(&T) -> R, T: Clone + Sync> {
+    vals: (F, SingleReceiver<T>),
+}
+
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Iterator for RecvViewIterator<R, F, T> {
+    type Item = R;
+
+    fn next(&mut self) -> Option<R> {
+        let opref = &mut self.vals.0;
+        match self.vals.1.recv_view(|v| opref(v)) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> RecvViewIterator<R, F, T> {
+    pub fn with_transform<Q, FQ: FnMut(&T) -> Q>(self, op: FQ) -> RecvViewIterator<Q, FQ, T> {
+        let (_, myr) = self.vals;
+        RecvViewIterator { vals: (op, myr) }
+    }
+}
+
+pub struct RecvPartialViewIterator<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> {
+    vals: (F, &'a SingleReceiver<T>),
+}
+
+impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> Iterator
+    for RecvPartialViewIterator<'a, R, F, T> {
+    type Item = R;
+
+    fn next(&mut self) -> Option<R> {
+        let opref = &mut self.vals.0;
+        match self.vals.1.recv_view(|v| opref(v)) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> RecvPartialViewIterator<'a, R, F, T> {
+    pub fn with_transform<Q, FQ: FnMut(&T) -> Q>(self,
+                                                 op: FQ)
+                                                 -> RecvPartialViewIterator<'a, Q, FQ, T> {
+        let (_, myr) = self.vals;
+        RecvPartialViewIterator { vals: (op, myr) }
     }
 }
 
@@ -1096,7 +1151,7 @@ mod test {
             }
             writer.unsubscribe();
             for _ in 0..receivers {
-                let this_reader = reader.add_receiver().into_single().unwrap();
+                let this_reader = reader.add_stream().into_single().unwrap();
                 scope.spawn(move || {
                     let mut myv = Vec::new();
                     for _ in 0..senders {
@@ -1149,7 +1204,7 @@ mod test {
     fn test_remove_reader() {
         let (writer, reader) = MultiQueue::<usize>::new(1);
         assert!(writer.try_send(1).is_ok());
-        let reader_2 = reader.add_receiver();
+        let reader_2 = reader.add_stream();
         assert!(writer.try_send(1).is_err());
         assert_eq!(1, reader.try_recv().unwrap());
         assert!(reader.try_recv().is_err());
@@ -1189,7 +1244,7 @@ mod test {
             }
             writer.unsubscribe();
             for _ in 0..receivers {
-                let _this_reader = reader.add_receiver();
+                let _this_reader = reader.add_stream();
                 for _ in 0..nclone {
                     let this_reader = _this_reader.clone();
                     scope.spawn(move || {
@@ -1282,7 +1337,7 @@ mod test {
     }
 
     #[test]
-    fn test_iterator_comp () {
+    fn test_iterator_comp() {
         let (writer, reader) = MultiQueue::<usize>::new(10);
         drop(writer);
         for _ in reader {}

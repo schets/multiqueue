@@ -60,7 +60,7 @@ fn recv(bar: &Barrier, reader: Receiver<Option<u64>>) {
         }
     }
     for val in v {
-         println!("{}", val);
+        println!("{}", val);
     }
 }
 
@@ -70,15 +70,15 @@ fn send(bar: &Barrier, writer: Sender<Option<u64>>, num_push: usize, num_us: usi
     for _ in 0..num_push {
         loop {
             let topush = Some(precise_time_ns());
-            if let Ok(_) =  writer.try_send(topush) {
+            if let Ok(_) = writer.try_send(topush) {
                 break;
             }
         }
-        for _ in 0..(num_us*20) {
+        for _ in 0..(num_us * 20) {
             waste_50_ns(&val);
         }
     }
-    while let Err(_) = writer.try_send(None) {};
+    while let Err(_) = writer.try_send(None) {}
 }
 
 fn main() {
@@ -86,9 +86,7 @@ fn main() {
     let bar = Barrier::new(2);
     let bref = &bar;
     scope(|scope| {
-        scope.spawn(move || {
-            send(bref, writer, 100000, 40);
-        });
+        scope.spawn(move || { send(bref, writer, 100000, 40); });
         recv(bref, reader);
     });
 }

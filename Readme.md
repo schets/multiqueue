@@ -35,16 +35,13 @@ So why would you choose MultiQueue over the built-in channels?
 
 On the other hand, you would want to use a channel/sync_channel if you:
   * Truly want an unbounded queue, although you should probably handle backlog instead
-  * Need senders to block when the queue is full and can;t use the futures api
+  * Need senders to block when the queue is full and can't use the futures api
   * Don't want the memory usage of a large buffer but need to fit many elements in
 
 Otherwise, in most cases, MultiQueue should be a good replacement for channels.
 In general, this will function very well as normal bounded queue with performance
 approaching that of hand-written queues for single/multiple consumers/producers
 even without taking advantage of the broadcast
-
-In a similar vein to channels, this queue can be a drop-in replacement for
-the futures mpsc with better performance and more capabilities
 
 ## <a name = "model">Queue Model</a>
 
@@ -53,7 +50,7 @@ There's an incoming FIFO data stream that is broadcast to a set of subscribers
 as if there were multiple streams being written to.
 There are two main differences:
   * MultiQueue transparently supports switching between single and multiple producers.
-  * Each stream which is broadcast to can be shared among multiple consumers.
+  * Each broadcast stream can be shared among multiple consumers.
 
 The last part makes the model a bit confusing, since there's a difference between a stream of data
 and something consuming that stream. To make things worse, each consumer may not actually see each
@@ -127,6 +124,9 @@ for i in 0..10 {
     send.try_send(i).unwrap();
 }
 
+// Drop the sender to close the queue
+drop(send);
+
 // prints
 // Got 0
 // Got 1
@@ -151,14 +151,14 @@ for i in 0..2 { // or n
     let cur_recv = recv.add_stream();
     thread::spawn(move || {
         for val in cur_recv {
-            println!("Thread {} got {}", i, val);
+            println!("Stream {} got {}", i, val);
         }
     });
 }
 
 // Take notice that I drop the reader - this removes it from
 // the queue, meaning that the readers in the new threads
-won't get starved by the lack of progress from recv
+// won't get starved by the lack of progress from recv
 recv.unsubscribe();
 
 for i in 0..10 {
@@ -170,18 +170,143 @@ for i in 0..10 {
     }
 }
 
+// Drop the sender to close the queue
+drop(send);
+
 // prints along the lines of
-// Thread 0 got 0
-// Thread 0 got 1
-// Thread 1 got 0
-// Thread 0 got 2
-// Thread 1 got 1
-// Thread 1 got 2
+// Stream 0 got 0
+// Stream 0 got 1
+// Stream 1 got 0
+// Stream 0 got 2
+// Stream 1 got 1
 // etc
 
 // some join mechanics here
 ```
 
+## Single-producer double stream, 2 consumers per stream
+Let's take the above and make each stream consumed by two consumers
+```rust
+extern crate multiqueue;
+
+use std::thread;
+
+let (send, recv) = multiqueue::new(4);
+
+for i in 0..2 { // or n
+    let cur_recv = recv.add_stream();
+    for j in 0..2 {
+        let stream_consumer = cur_recv.clone();
+        thread::spawn(move || {
+            for val in stream_consumer {
+                println!("Stream {} consumer {} got {}", i, j, val);
+            }
+        });
+    }
+    // cur_recv is dropped here
+}
+
+// Take notice that I drop the reader - this removes it from
+// the queue, meaning that the readers in the new threads
+// won't get starved by the lack of progress from recv
+recv.unsubscribe();
+
+for i in 0..10 {
+    // Don't do this busy loop in real stuff unless you're really sure
+    loop {
+        if send.try_send(i).is_ok() {
+            break;
+        }
+    }
+}
+drop(send);
+
+// prints along the lines of
+// Stream 0 consumer 1 got 2
+// Stream 0 consumer 0 got 0
+// Stream 1 consumer 0 got 0
+// Stream 0 consumer 1 got 1
+// Stream 1 consumer 1 got 1
+// Stream 1 consumer 0 got 2
+// etc
+
+// some join mechanics here
+```
+
+## Something wack`y
+Has anyone really been far even as decided to use even go want to do look more like?
+
+```rust
+extern crate multiqueue;
+
+use std::thread;
+
+let (send, recv) = multiqueue::new(4);
+
+// start like before
+for i in 0..2 { // or n
+    let cur_recv = recv.add_stream();
+    for j in 0..2 {
+        let stream_consumer = cur_recv.clone();
+        thread::spawn(move || {
+            for val in stream_consumer {
+                println!("Stream {} consumer {} got {}", i, j, val);
+            }
+        });
+    }
+    // cur_recv is dropped here
+}
+
+// On this stream, since there's only one consumer,
+// the receiver can be made into a SingleReceiver
+// which can view items inline in the queue
+let single_recv = recv.add_stream().into_single().unwrap();
+
+thread::spawn(move || {
+    for val in single_recv.iter_with(|item_ref| 10 * *item_ref) {
+        println!("{}", val);
+    }
+});
+
+// Same as above, except this time we just want to iterate until the receiver is empty
+let single_recv_2 = recv.add_stream().into_single().unwrap();
+
+thread::spawn(move || {
+    for val in single_recv_2.partial_iter_with(|item_ref| 10 * *item_ref) {
+        println!("{}", val);
+    }
+});
+
+// Take notice that I drop the reader - this removes it from
+// the queue, meaning that the readers in the new threads
+won't get starved by the lack of progress from recv
+recv.unsubscribe();
+
+// Many senders to give all the receivers something
+for _ in 0..3 {
+    let cur_send = send.clone();
+    for i in 0..10 {
+        // Don't do this busy loop in real stuff unless you're really sure
+        loop {
+            if cur_send.try_send(i).is_ok() {
+                break;
+            }
+        }
+    }
+}
+drop(send);
+
+// prints along the lines of
+// Stream 0 consumer 1 got 0
+// Stream 0 consumer 0 got 1
+// Stream 1 consumer 0 got 0
+// Stream 0 consumer 1 got 2
+// Stream 1 consumer 1 got 1
+// Stream 1 consumer 0 got 2
+// etc
+
+// some join mechanics here
+```
 
 ## <a name = "bench">Benchmarks</a>
 
@@ -192,13 +317,12 @@ These were done using the busywait method to block, but using a blocking wait on
 be more than fast enough for most use cases.
 
 
+Single Producer Single Consumer: 50-70 million ops per second. In this case, channels do ~8-11 million ops per second
 ```
 # -> -> @
 ```
-Single Producer Single Consumer: 50-70 million ops per second. In this case, channels do ~8-11 million ops per second
-
-
-throughput will be higher
+____
+Single Producer Single Consumer, broadcasted to two different streams: 28 million ops per second<sup>[2](#ft2)</sup>
 ```
          @
         /
@@ -206,9 +330,8 @@ throughput will be higher
         \
          @
 ```
-Single Producer Single Consumer, broadcasted to two different streams: 28 million ops per second<sup>[2](#ft2)</sup>
-
-
+____
+Single Producer Single Consumer, broadcasted to three different streams: 25 million ops per second<sup>[2](#ft2)</sup>
 ```
          @
         /
@@ -216,9 +339,8 @@ Single Producer Single Consumer, broadcasted to two different streams: 28 millio
         \
          @
 ```
-Single Producer Single Consumer, broadcasted to three different streams: 25 million ops per second<sup>[2](#ft2)</sup>
-
-
+____
+Multi Producer Single Consumer: 9 million ops per second. In this case, channels do ~8-9 million ops per second.
 ```
 #
  \
@@ -226,9 +348,8 @@ Single Producer Single Consumer, broadcasted to three different streams: 25 mill
  /
 #
 ```
-Multi Producer Single Consumer: 9 million ops per second. In this case, channels do ~8-9 million ops per second.
-
-
+____
+Multi Producer Single Consumer, broadcast to two different streams: 8 million ops per second
 ```
 #        @
  \      /
@@ -236,7 +357,6 @@ Multi Producer Single Consumer: 9 million ops per second. In this case, channels
  /      \
 #        @
 ```
-Multi Producer Single Consumer, broadcast to two different streams: 8 million ops per second
 ### Latency
 
 I need to rewrite the latency benchmark tool, but latencies will be approximately the
@@ -275,7 +395,7 @@ The queue won't overwrite a datapoint until all streams have advanced past it,
 so writes to the queue would fail. Depending on your goals, this is either a good or a bad thing.
 On one hand, nobody likes getting blocked/starved of updates because of some dumb slow thread.
 On the other hand, this basically enforces a sort of system-wide backlog control. If you want
-an example of not having that being bad, NYSE occasionally does not keep the consolidated feed
+an example why that's needed, NYSE occasionally does not keep the consolidated feed
 up to date with the individual feeds and markets fall into disarray.
 
 ## <a name = "footnotes">Footnotes</a>
