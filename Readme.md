@@ -31,7 +31,7 @@ So why would you choose MultiQueue over the built-in channels?
   * MultiQueue allows reading elements in-place in the queue in most cases, so you can broadcast elements without lots of copying
   * MultiQueue can act as a futures stream and sink
   * MultiQueue does not allocate on push/pop unlike channel, leading to much more predictable latencies
-  * Multiqueue is lockless<sup>[1](#ft1)</sup> unlike sync_channel, and fares decently under contention 
+  * Multiqueue is practically lockless<sup>[1](#ft1)</sup> unlike sync_channel, and fares decently under contention
 
 On the other hand, you would want to use a channel/sync_channel if you:
   * Truly want an unbounded queue, although you should probably handle backlog instead
