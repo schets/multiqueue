@@ -145,7 +145,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::new(4);
+let (send, recv) = multiqueue::multiqueue(4);
 
 for i in 0..2 { // or n
     let cur_recv = recv.add_stream();
@@ -191,7 +191,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::new(4);
+let (send, recv) = multiqueue::multiqueue(4);
 
 for i in 0..2 { // or n
     let cur_recv = recv.add_stream();
@@ -233,7 +233,7 @@ drop(send);
 // some join mechanics here
 ```
 
-## Something wack`y
+## Something wacky
 Has anyone really been far even as decided to use even go want to do look more like?
 
 ```rust
@@ -241,7 +241,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::new(4);
+let (send, recv) = multiqueue::multiqueue(4);
 
 // start like before
 for i in 0..2 { // or n
@@ -279,33 +279,21 @@ thread::spawn(move || {
 
 // Take notice that I drop the reader - this removes it from
 // the queue, meaning that the readers in the new threads
-won't get starved by the lack of progress from recv
+// won't get starved by the lack of progress from recv
 recv.unsubscribe();
 
 // Many senders to give all the receivers something
 for _ in 0..3 {
     let cur_send = send.clone();
     for i in 0..10 {
-        // Don't do this busy loop in real stuff unless you're really sure
-        loop {
+        thread::spawn(loop {
             if cur_send.try_send(i).is_ok() {
                 break;
             }
-        }
+        });
     }
 }
 drop(send);
-
-// prints along the lines of
-// Stream 0 consumer 1 got 0
-// Stream 0 consumer 0 got 1
-// Stream 1 consumer 0 got 0
-// Stream 0 consumer 1 got 2
-// Stream 1 consumer 1 got 1
-// Stream 1 consumer 0 got 2
-// etc
-
-// some join mechanics here
 ```
 
 ## <a name = "bench">Benchmarks</a>

@@ -173,12 +173,6 @@ impl<T: Clone> MultiQueue<T> {
     pub fn try_send_multi(&self, val: T) -> Result<(), TrySendError<T>> {
         let mut transaction = self.head.load_transaction(Relaxed);
 
-        // This tries to ensure the tail fetch metadata is always in the cache
-        // The effect of this is that whenever one has to find the minimum tail,
-        // the data about the loop is in-cache so that whole loop executes deep in
-        // an out-of-order engine while the branch predictor predicts there is more space
-        // and continues on pushing
-        self.tail.prefetch_metadata();
         unsafe {
             loop {
                 let (chead, wrap_valid_tag) = transaction.get();
@@ -209,6 +203,13 @@ impl<T: Clone> MultiQueue<T> {
                         };
                         ptr::write(&mut write_cell.val, val);
                         write_cell.wraps.store(wrap_valid_tag, Release);
+
+                        // This tries to ensure the tail fetch metadata is always in the cache
+                        // The effect of this is that whenever one has to find the minimum tail,
+                        // the data about the loop is in-cache so that whole loop executes deep in
+                        // an out-of-order engine while the branch predictor
+                        // predicts there is more space and continues on pushing
+                        self.tail.prefetch_metadata();
                         return Ok(());
                     }
                 }
@@ -219,7 +220,6 @@ impl<T: Clone> MultiQueue<T> {
     pub fn try_send_single(&self, val: T) -> Result<(), TrySendError<T>> {
         let transaction = self.head.load_transaction(Relaxed);
         let (chead, wrap_valid_tag) = transaction.get();
-        self.tail.prefetch_metadata(); // See push_multi on this
         unsafe {
             let write_cell = &mut *self.data.offset(chead);
             let tail_cache = self.tail_cache.load(Relaxed);
@@ -238,6 +238,7 @@ impl<T: Clone> MultiQueue<T> {
             };
             ptr::write(&mut write_cell.val, val);
             write_cell.wraps.store(wrap_valid_tag, Release);
+            self.tail.prefetch_metadata(); // See push_multi on this
             Ok(())
         }
     }
