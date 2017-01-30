@@ -79,6 +79,8 @@ fn runit(name: &str, n_senders: usize, n_readers: usize) {
 fn main() {
     runit("1p::1c", 1, 1);
     runit("1p::1c_2b", 1, 2);
+    runit("1p::1c_3b", 1, 3);
     runit("2p::1c", 2, 1);
     runit("2p::1c_2b", 2, 2);
+    runit("2p::1c_3b", 2, 3);
 }

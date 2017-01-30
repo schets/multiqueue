@@ -1,4 +1,11 @@
 extern crate crossbeam;
+
+
+////////
+//////// THIS IS BUSTED - I need to update it to use tsc,
+//////// the time function is way too expensive
+////////
+
 extern crate multiqueue;
 extern crate time;
 
