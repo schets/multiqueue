@@ -89,8 +89,6 @@ impl<'a> ReadAttempt<'a> {
 
     #[inline(always)]
     pub fn commit_direct(self, by: Index, ord: Ordering) {
-        debug_assert!(self.state == ReaderState::Single,
-                      "Direct multiqueue commit used in a multiwriter state");
         self.linked.commit_direct(by, ord);
     }
 }
@@ -126,6 +124,10 @@ impl Reader {
 
     pub fn get_consumers(&self) -> usize {
         unsafe { (*self.meta).num_consumers.load(Ordering::Relaxed) }
+    }
+
+    pub fn set_single(&self) {
+        unsafe { (*self.meta).state.set(ReaderState::Single) }
     }
 }
 

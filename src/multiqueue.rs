@@ -652,6 +652,7 @@ impl<T: Clone> Receiver<T> {
     pub fn into_single(self) -> Result<SingleReceiver<T>, Receiver<T>> {
         if self.reader.get_consumers() == 1 {
             fence(Acquire);
+            self.reader.set_single();
             Ok(SingleReceiver { reader: self })
         } else {
             Err(self)
@@ -1750,5 +1751,17 @@ mod test {
         let (writer, reader) = MultiQueue::<usize>::new(10);
         drop(writer);
         for _ in reader {}
+    }
+
+    #[test]
+    fn test_single_leav_multi() {
+        let (writer, reader) = MultiQueue::new(10);
+        let reader2 = reader.clone();
+        writer.try_send(1).unwrap();
+        writer.try_send(1).unwrap();
+        assert_eq!(reader2.recv().unwrap(), 1);
+        drop(reader2);
+        let reader_s = reader.into_single().unwrap();
+        assert!(reader_s.recv_view(|x| *x).is_ok());
     }
 }
