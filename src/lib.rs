@@ -164,6 +164,7 @@
 //! ```
 //!
 //! //! # Example: SPMC broadcast
+//!
 //! ```
 //! extern crate multiqueue;
 //!
