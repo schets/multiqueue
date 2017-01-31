@@ -2,6 +2,8 @@
 
 MultiQueue is a fast bounded mpmc queue that supports broadcast/multicast style operations [![Build Status](https://travis-ci.org/schets/multiqueue.svg?branch=master)](https://travis-ci.org/schets/multiqueue)
 
+[See the documentation here!](https://docs.rs/multiqueue)
+
 [Overview](#over)
 
 [Queue Model](#model)
