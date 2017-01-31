@@ -1,13 +1,12 @@
 [package]
 name = "multiqueue"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Sam Schetterer <samschet@gmail.com>"]
 license = "MIT"
 description = "A fast mpmc multicast queue"
 repository = "https://github.com/schets/multiqueue"
 documentation = "https://docs.rs/multiqueue"
 readme = "Readme.md"
-categories = ["data-structures", "concurrency", "algorithms", "web-programming::http-server", "asynchronous"]
 keywords = ["queue", "mpmc", "lockless", "broadcast", "message"]
 
 
@@ -17,6 +16,3 @@ futures = "0.1.9"
 smallvec = "0.3.1"
 parking_lot = "0.3"
 time = "0.1.35"
-
-[badges]
-travis-ci = { repository = "github.com/schets/multiqueue" }
