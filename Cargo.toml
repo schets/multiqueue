@@ -16,7 +16,7 @@ crossbeam = "0.2"
 futures = "0.1.9"
 smallvec = "0.3.1"
 parking_lot = "0.3"
-time = "*"
+time = "0.1.36"
 
 [badges]
 travis-ci = { repository = "github.com/schets/multiqueue" }
