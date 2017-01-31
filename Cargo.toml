@@ -2,6 +2,14 @@
 name = "multiqueue"
 version = "0.1.0"
 authors = ["Sam Schetterer <samschet@gmail.com>"]
+license = "MIT"
+description = "A fast mpmc multicast queue"
+repository = "github.com/schets/multiqueue"
+documentation = "https://docs.rs/multiqueue"
+readme = "Readme.md"
+categories = ["data-structures", "concurrency", "algorithms", "web-programming::http-server", "asynchronous"]
+keywords = ["queue", "mpmc", "lockless", "broadcast", "message"]
+
 
 [dependencies]
 crossbeam = "0.2"
@@ -9,3 +17,6 @@ futures = "0.1.9"
 smallvec = "0.3.1"
 parking_lot = "0.3"
 time = "*"
+
+[badges]
+travis-ci = { repository = "github.com/schets/multiqueue" }

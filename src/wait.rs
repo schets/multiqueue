@@ -6,11 +6,11 @@
 //! # Examples
 //!
 //! ```
-//! use multiqueue::wait;
+//! use multiqueue::wait::*;
 //! use multiqueue::multiqueue_with;
-//! let _ = multiqueue_with::<usize>(10, wait::BusyWait::new());
-//! let _ = multiqueue_with::<usize>(10, wait::YieldingWait::new()); // also see with_spins
-//! let _ = multiqueue_with::<usize>(10, wait::BlockingWait::new()); // also see with_spins
+//! let _ = multiqueue_with::<usize, BusyWait>(10, BusyWait::new());
+//! let _ = multiqueue_with::<usize, YieldingWait>(10, YieldingWait::new());
+//! let _ = multiqueue_with::<usize, BlockingWait>(10, BlockingWait::new());
 //! ```
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::AtomicUsize;
