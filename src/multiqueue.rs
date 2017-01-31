@@ -3,6 +3,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::error::Error;
 use std::fmt;
+use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 use std::sync::Arc;
@@ -26,6 +27,55 @@ extern crate smallvec;
 
 use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
 use self::futures::task::{park, Task};
+
+/// This is basically acting as a static bool
+/// so the queue can act as a normal mpmc in other circumstances
+trait DoDrop<T> {
+    fn do_drop() -> bool;
+    fn get_val(&mut T) -> T;
+    fn forget_val(T);
+}
+
+struct YesDrop<T> {
+    mk: PhantomData<T>,
+}
+
+impl<T: Clone> DoDrop<T> for YesDrop<T> {
+    #[inline(always)]
+    fn do_drop() -> bool {
+        true
+    }
+
+    #[inline(always)]
+    fn get_val(val: &mut T) -> T{
+        val.clone()
+    }
+
+    #[inline(always)]
+    fn forget_val(_v: T) {}
+}
+
+
+struct NoDrop<T> {
+    mk: PhantomData<T>,
+}
+
+impl<T> DoDrop<T> for NoDrop<T> {
+    #[inline(always)]
+    fn do_drop() -> bool {
+        false
+    }
+
+    #[inline(always)]
+    fn get_val(val: &mut T) -> T {
+        unsafe { ptr::read(val) }
+    }
+
+    #[inline(always)]
+    fn forget_val(val: T) {
+        mem::forget(val);
+    }
+}
 
 #[derive(Clone, Copy)]
 enum QueueState {
@@ -305,7 +355,7 @@ impl<T: Clone> MultiQueue<T> {
         (mwriter, mreader)
     }
 
-    pub fn try_send_multi(&self, val: T) -> Result<(), TrySendError<T>> {
+    pub fn try_send_multi<D: DoDrop<T>>(&self, val: T) -> Result<(), TrySendError<T>> {
         let mut transaction = self.head.load_transaction(Relaxed);
 
         unsafe {
@@ -331,7 +381,7 @@ impl<T: Clone> MultiQueue<T> {
                         // throughput in most cases but will really help latency.
                         // Hopefully the compiler is smart enough to get rid of this
                         // when there's no drop
-                        let _possible_drop = if !is_tagged(current_tag) {
+                        let _possible_drop = if D::do_drop() && !is_tagged(current_tag) {
                             Some(ptr::read(&write_cell.val))
                         } else {
                             None
@@ -479,7 +529,7 @@ impl<T: Clone> Sender<T> {
                     self.state.set(QueueState::Single);
                     self.queue.try_send_single(val)
                 } else {
-                    self.queue.try_send_multi(val)
+                    self.queue.try_send_multi::<YesDrop<T>>(val)
                 }
             }
         };
