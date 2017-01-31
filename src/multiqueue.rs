@@ -67,12 +67,121 @@ struct MultiQueue<T: Clone> {
     d4: [u8; 64],
 }
 
+/// This class is the sending half of the MultiQueue. It supports both
+/// single and multi consumer modes with competitive performance in each case.
+/// It only supports nonblocking writes (the futures sender being an exception)
+/// as well as being the conduit for adding new writers.
+///
+/// # Examples
+///
+/// ```
+/// use std::thread;
+///
+/// let (send, recv) = multiqueue::multiqueue(4);
+///
+/// let mut handles = vec![];
+///
+/// for i in 0..2 { // or n
+///     let cur_recv = recv.add_stream();
+///     for j in 0..2 {
+///         let stream_consumer = cur_recv.clone();
+///         handles.push(thread::spawn(move || {
+///             for val in stream_consumer {
+///                 println!("Stream {} consumer {} got {}", i, j, val);
+///             }
+///         }));
+///     }
+///     // cur_recv is dropped here
+/// }
+///
+/// // Take notice that I drop the reader - this removes it from
+/// // the queue, meaning that the readers in the new threads
+/// // won't get starved by the lack of progress from recv
+/// recv.unsubscribe();
+///
+/// for i in 0..10 {
+///     // Don't do this busy loop in real stuff unless you're really sure
+///     loop {
+///         if send.try_send(i).is_ok() {
+///             break;
+///         }
+///     }
+/// }
+/// drop(send);
+///
+/// for t in handles {
+///     t.join();
+/// }
+/// // prints along the lines of
+/// // Stream 0 consumer 1 got 2
+/// // Stream 0 consumer 0 got 0
+/// // Stream 1 consumer 0 got 0
+/// // Stream 0 consumer 1 got 1
+/// // Stream 1 consumer 1 got 1
+/// // Stream 1 consumer 0 got 2
+/// // etc
+/// ```
 pub struct Sender<T: Clone> {
     queue: Arc<MultiQueue<T>>,
     token: *const MemToken,
     state: Cell<QueueState>,
 }
 
+/// This class is the receiving half of the MultiQueue.
+/// Within each stream, it supports both single and multi consumer modes
+/// with competitive performance in each case. It supports blocking and
+/// nonblocking read modes as well as being the conduit for adding
+/// new streams.
+///
+/// # Examples
+///
+/// ```
+/// use std::thread;
+///
+/// let (send, recv) = multiqueue::multiqueue(4);
+///
+/// let mut handles = vec![];
+///
+/// for i in 0..2 { // or n
+///     let cur_recv = recv.add_stream();
+///     for j in 0..2 {
+///         let stream_consumer = cur_recv.clone();
+///         handles.push(thread::spawn(move || {
+///             for val in stream_consumer {
+///                 println!("Stream {} consumer {} got {}", i, j, val);
+///             }
+///         }));
+///     }
+///     // cur_recv is dropped here
+/// }
+///
+/// // Take notice that I drop the reader - this removes it from
+/// // the queue, meaning that the readers in the new threads
+/// // won't get starved by the lack of progress from recv
+/// recv.unsubscribe();
+///
+/// for i in 0..10 {
+///     // Don't do this busy loop in real stuff unless you're really sure
+///     loop {
+///         if send.try_send(i).is_ok() {
+///             break;
+///         }
+///     }
+/// }
+/// drop(send);
+///
+/// for t in handles {
+///     t.join();
+/// }
+/// // prints along the lines of
+/// // Stream 0 consumer 1 got 2
+/// // Stream 0 consumer 0 got 0
+/// // Stream 1 consumer 0 got 0
+/// // Stream 0 consumer 1 got 1
+/// // Stream 1 consumer 1 got 1
+/// // Stream 1 consumer 0 got 2
+/// // etc
+/// ```
 pub struct Receiver<T: Clone> {
     queue: Arc<MultiQueue<T>>,
     reader: Reader,
@@ -80,10 +189,34 @@ pub struct Receiver<T: Clone> {
     alive: bool,
 }
 
+/// This class is similar to the receiver, except it ensures that there
+/// is only one consumer for the stream it owns. This means that
+/// one can safely view the data in-place with the recv_view method family
+/// and avoid the cost of copying it. If there's only one receiver on a stream,
+/// it can be converted into a SingleReceiver
+///
+/// # Example:
+///
+/// ```
+/// use multiqueue::multiqueue;
+///
+/// let (w, r) = multiqueue(10);
+/// w.try_send(1).unwrap();
+/// let r2 = r.clone();
+/// // Fails since there's two receivers on the stream
+/// assert!(r2.into_single().is_err());
+/// let single_r = r.into_single().unwrap();
+/// let val = match single_r.try_recv_view(|x| 2 * *x) {
+///     Ok(val) => val,
+///     Err(_) => panic!("Queue should have an element"),
+/// };
+/// assert_eq!(2, val);
+/// ```
 pub struct SingleReceiver<T: Clone> {
     reader: Receiver<T>,
 }
 
+/// This is a sender that can transparently act as a futures stream
 #[derive(Clone)]
 pub struct FuturesSender<T: Clone> {
     writer: Sender<T>,
@@ -91,6 +224,7 @@ pub struct FuturesSender<T: Clone> {
     prod_wait: Arc<FuturesWait>,
 }
 
+/// This is a receiver that can transparently act as a futures stream
 #[derive(Clone)]
 pub struct FuturesReceiver<T: Clone> {
     reader: Receiver<T>,
@@ -98,6 +232,7 @@ pub struct FuturesReceiver<T: Clone> {
     prod_wait: Arc<FuturesWait>,
 }
 
+/// This is a single receiver that can transparently act as a futures stream
 pub struct FuturesSingleReceiver<R, F: FnMut(&T) -> R, T: Clone> {
     reader: SingleReceiver<T>,
     wait: Arc<FuturesWait>,
@@ -373,6 +508,37 @@ impl<T: Clone> Sender<T> {
 
 impl<T: Clone> Receiver<T> {
     /// Tries to receive a value from the queue without blocking.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// let (w, r) = multiqueue(10);
+    /// w.try_send(1).unwrap();
+    /// assert_eq!(1, r.try_recv().unwrap());
+    /// ```
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// use std::thread;
+    ///
+    /// let (send, recv) = multiqueue(10);
+    ///
+    /// let handle = thread::spawn(move || {
+    ///     for val in recv {
+    ///         println!("Got {}", val);
+    ///     }
+    /// });
+    ///
+    /// for i in 0..10 {
+    ///     send.try_send(i).unwrap();
+    /// }
+    ///
+    /// // Drop the sender to close the queue
+    /// drop(send);
+    ///
+    /// handle.join();
+    /// ```
     #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.examine_signals();
@@ -398,6 +564,62 @@ impl<T: Clone> Receiver<T> {
         }
     }
 
+    /// Adds a new data stream to the queue, starting at the same position
+    /// as the Receiver this is being called on.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// let (w, r) = multiqueue(10);
+    /// w.try_send(1).unwrap();
+    /// assert_eq!(r.recv().unwrap(), 1);
+    /// w.try_send(1).unwrap();
+    /// let r2 = r.add_stream();
+    /// assert_eq!(r.recv().unwrap(), 1);
+    /// assert_eq!(r2.recv().unwrap(), 1);
+    /// assert!(r.try_recv().is_err());
+    /// assert!(r2.try_recv().is_err());
+    /// ```
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    ///
+    /// use std::thread;
+    ///
+    /// let (send, recv) = multiqueue(4);
+    /// let mut handles = vec![];
+    /// for i in 0..2 { // or n
+    ///     let cur_recv = recv.add_stream();
+    ///     handles.push(thread::spawn(move || {
+    ///         for val in cur_recv {
+    ///             println!("Stream {} got {}", i, val);
+    ///         }
+    ///     }));
+    /// }
+    ///
+    /// // Take notice that I drop the reader - this removes it from
+    /// // the queue, meaning that the readers in the new threads
+    /// // won't get starved by the lack of progress from recv
+    /// recv.unsubscribe();
+    ///
+    /// for i in 0..10 {
+    ///     // Don't do this busy loop in real stuff unless you're really sure
+    ///     loop {
+    ///         if send.try_send(i).is_ok() {
+    ///             break;
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// // Drop the sender to close the queue
+    /// drop(send);
+    ///
+    /// for t in handles {
+    ///     t.join();
+    /// }
+    ///
+    /// ```
     pub fn add_stream(&self) -> Receiver<T> {
         Receiver {
             queue: self.queue.clone(),
@@ -407,6 +629,26 @@ impl<T: Clone> Receiver<T> {
         }
     }
 
+    /// If there is only one Receiver on the stream, converts the
+    /// Receiver into a SingleReceiver otherwise returns the Receiver.
+    ///
+    /// # Example:
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    ///
+    /// let (w, r) = multiqueue(10);
+    /// w.try_send(1).unwrap();
+    /// let r2 = r.clone();
+    /// // Fails since there's two receivers on the stream
+    /// assert!(r2.into_single().is_err());
+    /// let single_r = r.into_single().unwrap();
+    /// let val = match single_r.try_recv_view(|x| 2 * *x) {
+    ///     Ok(val) => val,
+    ///     Err(_) => panic!("Queue should have an element"),
+    /// };
+    /// assert_eq!(2, val);
+    /// ```
     pub fn into_single(self) -> Result<SingleReceiver<T>, Receiver<T>> {
         if self.reader.get_consumers() == 1 {
             fence(Acquire);
@@ -416,6 +658,23 @@ impl<T: Clone> Receiver<T> {
         }
     }
 
+    /// Returns a non-owning iterator that iterates over the queue
+    /// until it fails to receive an item, either through being empty
+    /// or begin disconnected. This iterator will never block.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// let (w, r) = multiqueue(2);
+    /// for _ in 0 .. 3 {
+    ///     w.try_send(1).unwrap();
+    ///     w.try_send(2).unwrap();
+    ///     for val in r.partial_iter().zip(1..2) {
+    ///         assert_eq!(val.0, val.1);
+    ///     }
+    /// }
+    /// ```
     pub fn partial_iter<'a>(&'a self) -> RecvPartialIterator<'a, T> {
         RecvPartialIterator { reader: self }
     }
@@ -481,11 +740,36 @@ impl<T: Clone + Sync> SingleReceiver<T> {
         self.reader.try_recv()
     }
 
+    // Identical to Receiver::recv
     #[inline(always)]
     pub fn recv(&self) -> Result<T, RecvError> {
         self.reader.recv()
     }
 
+    /// Applies the passed function to the value in the queue without copying it out
+    /// If there is no data in the queue or the writers have disconnected,
+    /// returns an Err((F, TryRecvError))
+    ///
+    /// # Example
+    /// ```
+    /// use multiqueue::multiqueue;
+    ///
+    /// let (w, r) = multiqueue(10);
+    /// let single_r = r.into_single().unwrap();
+    /// for i in 0..5 {
+    ///     w.try_send(i).unwrap();
+    /// }
+    ///
+    /// for i in 0..5 {
+    ///     let val = match single_r.recv_view(|x| 1 + *x) {
+    ///         Ok(val) => val,
+    ///         Err(_) => panic!("Queue shouldn't be disconncted or empty"),
+    ///     };
+    ///     assert_eq!(i + 1, val);
+    /// }
+    /// drop(w);
+    /// assert!(single_r.recv_view(|x| *x).is_err());
+    /// ```
     #[inline(always)]
     pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
         self.reader.examine_signals();
@@ -495,6 +779,30 @@ impl<T: Clone + Sync> SingleReceiver<T> {
         }
     }
 
+    /// Applies the passed function to the value in the queue without copying it out
+    /// If there is no data in the queue, blocks until an item is pushed into the queue
+    /// or all writers disconnect
+    ///
+    /// # Example
+    /// ```
+    /// use multiqueue::multiqueue;
+    ///
+    /// let (w, r) = multiqueue(10);
+    /// let single_r = r.into_single().unwrap();
+    /// for i in 0..5 {
+    ///     w.try_send(i).unwrap();
+    /// }
+    ///
+    /// for i in 0..5 {
+    ///     let val = match single_r.recv_view(|x| 1 + *x) {
+    ///         Ok(val) => val,
+    ///         Err(_) => panic!("Queue shouldn't be disconncted or empty"),
+    ///     };
+    ///     assert_eq!(i + 1, val);
+    /// }
+    /// drop(w);
+    /// assert!(single_r.recv_view(|x| *x).is_err());
+    /// ```
     pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, mut op: F) -> Result<R, (F, RecvError)> {
         self.reader.examine_signals();
         loop {
@@ -512,13 +820,57 @@ impl<T: Clone + Sync> SingleReceiver<T> {
         }
     }
 
+    /// This adds a new stream with a Single Receiver, otherwise it
+    /// is identical to Receiver::add_stream()
     pub fn add_stream(&self) -> SingleReceiver<T> {
         self.reader.add_stream().into_single().unwrap()
     }
 
+    /// Returns an iterator acting over the results of the SingleReceiver
+    /// with the given function called on them. Essentially the loop
+    /// match self.recv() {...} in iterator form
+    ///
+    /// Notes: The original reader an be obtained fom the iterator with the function get_reader
+    ///
+    /// #Examples
+    /// ```
+    /// use multiqueue::multiqueue;
+    ///
+    /// let (w, r) = multiqueue(10);
+    /// for i in 0..5 {
+    ///     w.try_send(i).unwrap();
+    /// }
+    /// drop(w);
+    /// for val in r.into_single().unwrap().iter_with(|x| *x + 1).zip(1..6) {
+    ///     assert_eq!(val.0, val.1);
+    /// }
+    /// ```
     pub fn iter_with<R, F: FnMut(&T) -> R>(self, op: F) -> RecvViewIterator<R, F, T> {
         RecvViewIterator { vals: (op, self) }
     }
+
+    /// Returns an iterator acting over the results of the SingleReceiver
+    /// with the given function called on them in a similar fashion to iter_with,
+    /// except this iterator exits once the queue is empty and does not take ownership of
+    /// the receiver
+    ///
+    /// Notes: The original reader an be obtained fom the iterator with the function get_reader
+    ///
+    /// #Examples
+    /// ```
+    /// use multiqueue::multiqueue;
+    ///
+    /// let (w, r) = multiqueue(10);
+    /// let single_r = r.into_single().unwrap();
+    /// for _ in 0..2 {
+    ///     for i in 0..5 {
+    ///         w.try_send(i).unwrap();
+    ///     }
+    ///     for val in single_r.partial_iter_with(|x| *x + 1).zip(1..6) {
+    ///         assert_eq!(val.0, val.1);
+    ///     }
+    /// }
+    /// ```
 
     pub fn partial_iter_with<'a, R, F: FnMut(&T) -> R>(&'a self,
                                                        op: F)
@@ -538,8 +890,6 @@ impl<T: Clone + Sync> SingleReceiver<T> {
     /// let _mreader2 = sreader.into_multi();
     /// // Can't use sreader anymore!
     /// // mreader.try_recv_view(|x| x+1) doesn't work since multireader can't do view methods
-    ///
-    ///
     /// ```
     pub fn into_multi(self) -> Receiver<T> {
         self.reader
@@ -552,10 +902,12 @@ impl<T: Clone + Sync> SingleReceiver<T> {
 }
 
 impl<T: Clone> FuturesSender<T> {
+    /// Identical to Sender::try_send()
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
         self.writer.try_send(val)
     }
 
+    /// Identical to Sender::unsubscribe()
     pub fn unsubscribe(self) {
         self.writer.unsubscribe()
     }
@@ -568,6 +920,7 @@ impl<T: Clone> FuturesReceiver<T> {
         self.reader.try_recv()
     }
 
+    /// Creates a new stream and returns a FuturesReceiver on that stream
     pub fn add_stream(&self) -> FuturesReceiver<T> {
         let rx = self.reader.add_stream();
         FuturesReceiver {
@@ -577,6 +930,8 @@ impl<T: Clone> FuturesReceiver<T> {
         }
     }
 
+    /// Attempts to transform this receiver into a FuturesSingleReceiver
+    /// calling the passed function on the input data.
     pub fn into_single<R, F: FnMut(&T) -> R>
         (self,
          op: F)
@@ -608,12 +963,19 @@ impl<T: Clone> FuturesReceiver<T> {
         }
     }
 
+    /// Identical to Receiver::unsubscribe()
     pub fn unsubscribe(self) -> bool {
         self.reader.reader.get_consumers() == 1
     }
 }
 
+/// This struct acts as a SingleReceiver except operating as a futures Stream on incoming data
+///
+/// Since this operates in an iterator-like manner on the data stream, it holds the function
+/// it calls and to use a different function must transform itself into a different
+/// FuturesSingleReceiver using transform_operation
 impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReceiver<R, F, T> {
+    /// Identical to SingleReceiver::try_recv, uses the operation held by the FuturesSingleReceiver
     #[inline(always)]
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
         let opref = &mut self.op;
@@ -622,6 +984,7 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReceiver<R, F, T> {
         rval.map_err(|x| x.1)
     }
 
+    /// Adds another stream to the queue with a FuturesSingleReceiver using the passed function
     pub fn add_stream_with<Q, FQ: FnMut(&T) -> Q>(&self,
                                                   op: FQ)
                                                   -> FuturesSingleReceiver<Q, FQ, T> {
@@ -634,6 +997,8 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReceiver<R, F, T> {
         }
     }
 
+    /// This transforms the receiver into another FuturesSingleReceiver
+    /// using a different function on the same stream
     pub fn transform_operation<Q, FQ: FnMut(&T) -> Q>(self,
                                                       op: FQ)
                                                       -> FuturesSingleReceiver<Q, FQ, T> {
@@ -642,6 +1007,7 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> FuturesSingleReceiver<R, F, T> {
         self.add_stream_with(op)
     }
 
+    /// Identical to Receiver::unsubscribe()
     pub fn unsubscribe(self) -> bool {
         self.reader.reader.reader.get_consumers() == 1
     }
@@ -689,6 +1055,7 @@ impl<T: Clone> Sink for FuturesSender<T> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
+    /// Essentially try_send except parks if the queue is full
     fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
 
         match self.prod_wait.send_or_park(|m| self.writer.try_send(m), msg) {
@@ -713,6 +1080,7 @@ impl<T: Clone> Stream for FuturesReceiver<T> {
     type Item = T;
     type Error = ();
 
+    /// Essentially the same as recv
     fn poll(&mut self) -> Poll<Option<T>, ()> {
         self.reader.examine_signals();
         loop {
@@ -938,6 +1306,10 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> RecvViewIterator<R, F, T> {
         let (_, myr) = self.vals;
         RecvViewIterator { vals: (op, myr) }
     }
+
+    pub fn get_receiver(self) -> SingleReceiver<T> {
+        self.vals.1
+    }
 }
 
 pub struct RecvPartialViewIterator<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> {
@@ -950,7 +1322,7 @@ impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> Iterator
 
     fn next(&mut self) -> Option<R> {
         let opref = &mut self.vals.0;
-        match self.vals.1.recv_view(|v| opref(v)) {
+        match self.vals.1.try_recv_view(|v| opref(v)) {
             Ok(val) => Some(val),
             Err(_) => None,
         }
@@ -1073,16 +1445,52 @@ unsafe impl<T: Send + Clone> Send for Sender<T> {}
 unsafe impl<T: Send + Clone> Send for Receiver<T> {}
 unsafe impl<T: Send + Clone> Send for SingleReceiver<T> {}
 
+/// Creates a (Sender, Receiver) pair with a capacity that's
+/// the next power of two >= the given capacity
+///
+/// # Example
+/// ```
+/// use multiqueue::multiqueue;
+/// let (w, r) = multiqueue(10);
+/// w.try_send(10).unwrap();
+/// assert_eq!(10, r.try_recv().unwrap());
+/// ```
 pub fn multiqueue<T: Clone>(capacity: Index) -> (Sender<T>, Receiver<T>) {
     MultiQueue::new(capacity)
 }
 
+/// Creates a (Sender, Receiver) pair with a capacity that's
+/// the next power of two >= the given capacity and the specified wait strategy
+///
+/// # Example
+/// ```
+/// use multiqueue::multiqueue_with;
+/// use multiqueue::wait::BusyWait;
+/// let (w, r) = multiqueue_with(10, BusyWait::new());
+/// w.try_send(10).unwrap();
+/// assert_eq!(10, r.try_recv().unwrap());
+/// ```
 pub fn multiqueue_with<T: Clone, W: Wait + 'static>(capacity: Index,
                                                     wait: W)
                                                     -> (Sender<T>, Receiver<T>) {
     MultiQueue::new_with(capacity, wait)
 }
 
+/// Creates a (FuturesSender, FuturesReceiver) pair witha  capacity
+/// that's the next power of two >= the given capacity
+///
+/// # Example
+/// ``'no_run
+/// use multiqueue::futures_multiqueue;
+/// extern crate futures;
+/// use futures::stream::Stream;
+/// use futures::sink::Sink;
+///
+/// let (fw, fr) = futures_multiqueue(10);
+///
+///
+///
+/// ```
 pub fn futures_multiqueue<T: Clone>(capacity: Index) -> (FuturesSender<T>, FuturesReceiver<T>) {
     let cons_arc = Arc::new(FuturesWait::new());
     let prod_arc = Arc::new(FuturesWait::new());

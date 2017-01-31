@@ -60,7 +60,7 @@ to certain elements.
 A helpful mental model may be to think about this as if each stream was really just an mpmc
 queue that was getting pushed to, and the MultiQueue structure just assembled a bunch together behind the scenes.
 
-An diagram tha represents a general use case of the queue where each consumer has unique access to a stream
+An diagram that represents a general use case of the queue where each consumer has unique access to a stream
 is below - the # stand in for producers and @ stands in for the consumer of each stream, each with a label.
 The lines are meant to show the data flow through the queue.
 
@@ -84,7 +84,7 @@ However, in MultiQueue, each logical consumer might actually be demultiplexed ac
 -> #        @-3
 ```
 
-If this diagram is redrawn with each of the producers sending in a sequenced element (time goes left  to right):
+If this diagram is redrawn with each of the producers sending in a sequenced element (time goes left to right):
 
 
 ```
@@ -100,7 +100,7 @@ If one imagines this as a webserver, the streams for @-1 and @-3 might be doing 
 or metrics gathering and can handle the workload completely on one core, @-2 is doing expensive work handling requests
 and is split into multiple workers dealing with the data stream.
 
-Since that probably made no sense, here are some examples
+Since those drawings probably made no sense, here are some examples
 
 ## <a name = "examples">Examples</a>
 

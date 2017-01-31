@@ -1,3 +1,17 @@
+//! This module contains the waiting strategies used by the queue
+//! when there is no data left. Users should not find themselves
+//! directly accessing these except for construction
+//! unless a custom Wait is being written.
+//!
+//! # Examples
+//!
+//! ```
+//! use multiqueue::wait;
+//! use multiqueue::multiqueue_with;
+//! let _ = multiqueue_with::<usize>(10, wait::BusyWait::new());
+//! let _ = multiqueue_with::<usize>(10, wait::YieldingWait::new()); // also see with_spins
+//! let _ = multiqueue_with::<usize>(10, wait::BlockingWait::new()); // also see with_spins
+//! ```
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::AtomicUsize;
 use std::thread::yield_now;
@@ -20,6 +34,8 @@ pub fn check(seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
     wc.load(Relaxed) == 0 || seq == cur_count || past(seq, cur_count).1
 }
 
+/// This is the trait that something implements to allow receivers
+/// to block waiting for more data.
 pub trait Wait {
     /// Causes the reader to block until the queue is available. Is passed
     /// the queue tag which the readers are waiting on, a reference to the
@@ -67,10 +83,13 @@ impl BusyWait {
 }
 
 impl YieldingWait {
+    /// Calls with_spins(DEFAULT_TRY_SPINS, DEFAULT_YIELD_SPINS)
     pub fn new() -> YieldingWait {
         YieldingWait::with_spins(DEFAULT_TRY_SPINS, DEFAULT_YIELD_SPINS)
     }
 
+    /// Constructs a YieldingWait that busywaits for spins_first spins
+    /// and then yields every spins_yield spins.
     pub fn with_spins(spins_first: usize, spins_yield: usize) -> YieldingWait {
         YieldingWait {
             spins_first: spins_first,
@@ -80,10 +99,13 @@ impl YieldingWait {
 }
 
 impl BlockingWait {
+    /// Calls with_spins(DEFAULT_TRY_SPINS, DEFAULT_YIELD_SPINS)
     pub fn new() -> BlockingWait {
         BlockingWait::with_spins(DEFAULT_TRY_SPINS, DEFAULT_YIELD_SPINS)
     }
 
+    /// Constructs a YieldingWait that busywaits for spins_first spins
+    /// and then yields for spins_yield spins, then blocks on a condition variable.
     pub fn with_spins(spins_first: usize, spins_yield: usize) -> BlockingWait {
         BlockingWait {
             spins_first: spins_first,
@@ -122,8 +144,8 @@ impl Wait for YieldingWait {
             }
         }
         loop {
+            yield_now();
             for _ in 0..self.spins_yield {
-                yield_now();
                 if check(seq, w_pos, wc) {
                     return;
                 }
