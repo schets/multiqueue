@@ -297,5 +297,376 @@ mod multiqueue;
 mod read_cursor;
 pub mod wait;
 
-pub use multiqueue::{multiqueue, multiqueue_with, Receiver, SingleReceiver, Sender,
-                     FuturesReceiver, FuturesSender, futures_multiqueue};
+use multiqueue::{InnerSend, InnerRecv, BCast, MPMC, MultiQueue};
+use countedindex::Index;
+
+use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
+
+/// This class is the sending half of the MultiQueue. It supports both
+/// single and multi consumer modes with competitive performance in each case.
+/// It only supports nonblocking writes (the futures sender being an exception)
+/// as well as being the conduit for adding new writers.
+///
+/// # Examples
+///
+/// ```
+/// use std::thread;
+///
+/// let (send, recv) = multiqueue::multiqueue(4);
+///
+/// let mut handles = vec![];
+///
+/// for i in 0..2 { // or n
+///     let cur_recv = recv.add_stream();
+///     for j in 0..2 {
+///         let stream_consumer = cur_recv.clone();
+///         handles.push(thread::spawn(move || {
+///             for val in stream_consumer {
+///                 println!("Stream {} consumer {} got {}", i, j, val);
+///             }
+///         }));
+///     }
+///     // cur_recv is dropped here
+/// }
+///
+/// // Take notice that I drop the reader - this removes it from
+/// // the queue, meaning that the readers in the new threads
+/// // won't get starved by the lack of progress from recv
+/// recv.unsubscribe();
+///
+/// for i in 0..10 {
+///     // Don't do this busy loop in real stuff unless you're really sure
+///     loop {
+///         if send.try_send(i).is_ok() {
+///             break;
+///         }
+///     }
+/// }
+/// drop(send);
+///
+/// for t in handles {
+///     t.join();
+/// }
+/// // prints along the lines of
+/// // Stream 0 consumer 1 got 2
+/// // Stream 0 consumer 0 got 0
+/// // Stream 1 consumer 0 got 0
+/// // Stream 0 consumer 1 got 1
+/// // Stream 1 consumer 1 got 1
+/// // Stream 1 consumer 0 got 2
+/// // etc
+/// ```
+#[derive(Clone)]
+pub struct MulticastSender<T: Clone> {
+    sender: InnerSend<BCast<T>, T>,
+}
+
+/// This class is the receiving half of the MultiQueue.
+/// Within each stream, it supports both single and multi consumer modes
+/// with competitive performance in each case. It supports blocking and
+/// nonblocking read modes as well as being the conduit for adding
+/// new streams.
+///
+/// # Examples
+///
+/// ```
+/// use std::thread;
+///
+/// let (send, recv) = multiqueue::multiqueue(4);
+///
+/// let mut handles = vec![];
+///
+/// for i in 0..2 { // or n
+///     let cur_recv = recv.add_stream();
+///     for j in 0..2 {
+///         let stream_consumer = cur_recv.clone();
+///         handles.push(thread::spawn(move || {
+///             for val in stream_consumer {
+///                 println!("Stream {} consumer {} got {}", i, j, val);
+///             }
+///         }));
+///     }
+///     // cur_recv is dropped here
+/// }
+///
+/// // Take notice that I drop the reader - this removes it from
+/// // the queue, meaning that the readers in the new threads
+/// // won't get starved by the lack of progress from recv
+/// recv.unsubscribe();
+///
+/// for i in 0..10 {
+///     // Don't do this busy loop in real stuff unless you're really sure
+///     loop {
+///         if send.try_send(i).is_ok() {
+///             break;
+///         }
+///     }
+/// }
+/// drop(send);
+///
+/// for t in handles {
+///     t.join();
+/// }
+/// // prints along the lines of
+/// // Stream 0 consumer 1 got 2
+/// // Stream 0 consumer 0 got 0
+/// // Stream 1 consumer 0 got 0
+/// // Stream 0 consumer 1 got 1
+/// // Stream 1 consumer 1 got 1
+/// // Stream 1 consumer 0 got 2
+/// // etc
+/// ```
+#[derive(Clone)]
+pub struct MulticastReceiver<T: Clone> {
+    reader: InnerRecv<BCast<T>, T>,
+}
+
+
+/// This class is similar to the receiver, except it ensures that there
+/// is only one consumer for the stream it owns. This means that
+/// one can safely view the data in-place with the recv_view method family
+/// and avoid the cost of copying it. If there's only one receiver on a stream,
+/// it can be converted into a SingleInnerRecv
+///
+/// # Example:
+///
+/// ```
+/// use multiqueue::multiqueue;
+///
+/// let (w, r) = multiqueue(10);
+/// w.try_send(1).unwrap();
+/// let r2 = r.clone();
+/// // Fails since there's two receivers on the stream
+/// assert!(r2.into_single().is_err());
+/// let single_r = r.into_single().unwrap();
+/// let val = match single_r.try_recv_view(|x| 2 * *x) {
+///     Ok(val) => val,
+///     Err(_) => panic!("Queue should have an element"),
+/// };
+/// assert_eq!(2, val);
+/// ```
+pub struct SingleBcastReceiver<T: Clone + Sync> {
+    reader: InnerRecv<BCast<T>, T>,
+}
+
+/// This is the receiving end of a standard mpmc view of the queue
+/// It functions similarly to the broadcast queue execpt there
+/// is only ever one stream. As a result, the type doesn't need to be clone
+#[derive(Clone, Error)]
+pub struct MPMCReceiver<T> {
+    reader: InnerRecv<MPMC<T>, T>,
+}
+
+pub struct SingleMPMCReceiver<T> {
+    reader: InnerRecv<MPMC<T>, T>,
+}
+
+impl<T: Clone> MulticastReceiver<T> {
+    /// Tries to receive a value from the queue without blocking.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::multicast_queue;
+    /// let (w, r) = multicast_queue(10);
+    /// w.try_send(1).unwrap();
+    /// assert_eq!(1, r.try_recv().unwrap());
+    /// ```
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// use std::thread;
+    ///
+    /// let (send, recv) = multiqueue(10);
+    ///
+    /// let handle = thread::spawn(move || {
+    ///     for val in recv {
+    ///         println!("Got {}", val);
+    ///     }
+    /// });
+    ///
+    /// for i in 0..10 {
+    ///     send.try_send(i).unwrap();
+    /// }
+    ///
+    /// // Drop the sender to close the queue
+    /// drop(send);
+    ///
+    /// handle.join();
+    /// ```
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.reader.try_recv()
+    }
+
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.reader.recv()
+    }
+
+    pub fn add_stream(&self) -> MulticastReceiver<T> {
+        MulticastReceiver {
+            reader: reader.add_stream(),
+        }
+    }
+
+    /// Removes the given reader from the queue subscription lib
+    /// Returns true if this is the last reader in a given broadcast unit
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// let (writer, reader) = multiqueue(1);
+    /// let reader_2_1 = reader.add_stream();
+    /// let reader_2_2 = reader_2_1.clone();
+    /// writer.try_send(1).expect("This will succeed since queue is empty");
+    /// reader.try_recv().expect("This reader can read");
+    /// assert!(writer.try_send(1).is_err(), "This fails since the reader2 group hasn't advanced");
+    /// assert!(!reader_2_2.unsubscribe(), "This returns false since reader_2_1 is still alive");
+    /// assert!(reader_2_1.unsubscribe(),
+    ///         "This returns true since there are no readers alive in the reader_2_x group");
+    /// writer.try_send(1).expect("This succeeds since the reader_2 group is not blocking");
+    /// ```
+    pub fn unsubscribe(self) -> bool {
+        self.reader.unsubscribe()
+    }
+}
+
+impl<T> MPMCReceiver<T> {
+    /// Tries to receive a value from the queue without blocking.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    /// let (w, r) = mpmc_queue(10);
+    /// w.try_send(1).unwrap();
+    /// assert_eq!(1, r.try_recv().unwrap());
+    /// ```
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// use std::thread;
+    ///
+    /// let (send, recv) = multiqueue(10);
+    ///
+    /// let handle = thread::spawn(move || {
+    ///     for val in recv {
+    ///         println!("Got {}", val);
+    ///     }
+    /// });
+    ///
+    /// for i in 0..10 {
+    ///     send.try_send(i).unwrap();
+    /// }
+    ///
+    /// // Drop the sender to close the queue
+    /// drop(send);
+    ///
+    /// handle.join();
+    /// ```
+
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.reader.try_recv()
+    }
+
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.reader.recv()
+    }
+
+    /// Removes the given reader from the queue subscription lib
+    /// Returns true if this is the last reader in a given broadcast unit
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// let (writer, reader) = multiqueue(2);
+    /// writer.try_send(1).expect("This will succeed since queue is empty");
+    /// reader.try_recv().expect("This reader can read");
+    /// reader.unsubscribe();
+    /// // Fails since there's no readers left
+    /// assert!(writer.try_send(1).is_err());
+    /// ```
+    pub fn unsubscribe(self) -> bool {
+        self.reader.unsubscribe()
+    }
+}
+
+/*
+/// If there is only one InnerRecv on the stream, converts the
+/// InnerRecv into a SingleInnerRecv otherwise returns the InnerRecv.
+///
+/// # Example:
+///
+/// ```
+/// use multiqueue::multiqueue;
+///
+/// let (w, r) = multiqueue(10);
+/// w.try_send(1).unwrap();
+/// let r2 = r.clone();
+/// // Fails since there's two receivers on the stream
+/// assert!(r2.into_single().is_err());
+/// let single_r = r.into_single().unwrap();
+/// let val = match single_r.try_recv_view(|x| 2 * *x) {
+///     Ok(val) => val,
+///     Err(_) => panic!("Queue should have an element"),
+/// };
+/// assert_eq!(2, val);
+//    pub fn into_single(&self) -> Result<Receiver<T>, Sender<T>> {
+//
+//   }
+ */
+
+impl<T> SingleMPMCReceiver<T> {
+
+    /// Identical to MPMCReceiver::try_recv
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.reader.try_recv()
+    }
+
+    /// Identical to MPMCReceiver::recv
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.reader.recv()
+    }
+
+
+    /// Similar to SingleMcastReceiver::try_recv_view, except this closure takes
+    /// a mutable reference to the data
+    pub fn try_recv_view<R, F: FnOnce(&mut T) -> R>(op: F) -> Result<R, (F, TryRecvError)> {
+        self.reader.try_recv_view(op)
+    }
+
+    /// Similar to SingleMcastReceiver::recv_view, except this closure takes
+    /// a mutable reference to the data
+    pub fn try_recv_view<R, F: FnOnce(&mut T) -> T>(op: F) -> Result<R, (F, RecvError)> {
+        self.reader.recv_view(op)
+    }
+
+    /// Removes the given reader from the queue subscription lib
+    /// Returns true if this is the last reader in a given broadcast unit
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use multiqueue::multiqueue;
+    /// let (writer, reader) = multiqueue(2);
+    /// writer.try_send(1).expect("This will succeed since queue is empty");
+    /// reader.try_recv().expect("This reader can read");
+    /// reader.unsubscribe();
+    /// // Fails since there's no readers left
+    /// assert!(writer.try_send(1).is_err());
+    /// ```
+    pub fn unsubscribe(self) -> bool {
+        self.reader.unsubscribe()
+    }
+}
+
+pub fn multicast_queue<T: Clone>(capacity: Index) -> (MulticastSender<T>, MulticastReceiver<T>) {
+    let (send, recv) = MultiQueue::<BCast<T>, T>::new(capacity);
+    (MulticastSender { sender: send }, MulticastReceiver { reader: recv })
+}
+
+pub fn mpmc_queue<T>(capacity: Index) -> (MPMCSender, MPMCReceiver) {
+    let (send, recv) = MultiQueue::<BCast<T>, T>::new(capacity);
+    (MPMCSender { sender: send }, MPMCReceiver { reader: recv })
+}

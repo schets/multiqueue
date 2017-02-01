@@ -39,6 +39,7 @@ On the other hand, you would want to use a channel/sync_channel if you:
   * Truly want an unbounded queue, although you should probably handle backlog instead
   * Need senders to block when the queue is full and can't use the futures api
   * Don't want the memory usage of a large buffer but need to fit many elements in
+  * You frequently add/remove producers/consumers
 
 Otherwise, in most cases, MultiQueue should be a good replacement for channels.
 In general, this will function very well as normal bounded queue with performance
@@ -355,6 +356,9 @@ These will be somewhat higher with multiple producers
 and multiple consumers since each one must perform an RMW before finishing a write or read.
 
 ## <a name = "faq">FAQ</a>
+
+#### My type isn't Clone, can I use the queue?
+You can use the MPMC portions of the queue, but you can't broadcast anything
 
 #### Why can't senders block even though readers can?
 It's sensible for a reader to block if there is truly nothing for it to do, while the equivalent
