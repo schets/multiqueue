@@ -2,7 +2,7 @@ extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
-use multiqueue::{Receiver, Sender, multiqueue_with, wait};
+use multiqueue::{MulticastReceiver, MulticastSender, multicast_queue, wait};
 
 use time::precise_time_ns;
 
@@ -12,7 +12,7 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[inline(never)]
-fn recv(bar: &Barrier, mreader: Receiver<u64>, sum: &AtomicUsize, check: bool) {
+fn recv(bar: &Barrier, mreader: MulticastReceiver<u64>, sum: &AtomicUsize, check: bool) {
     let reader = mreader.into_single().unwrap();
     bar.wait();
     let start = precise_time_ns();
@@ -34,7 +34,7 @@ fn recv(bar: &Barrier, mreader: Receiver<u64>, sum: &AtomicUsize, check: bool) {
     sum.fetch_add((precise_time_ns() - start) as usize, Ordering::SeqCst);
 }
 
-fn send(bar: &Barrier, writer: Sender<u64>, num_push: usize) {
+fn send(bar: &Barrier, writer: MulticastSender<u64>, num_push: usize) {
     bar.wait();
     for i in 0..num_push as u64 {
         loop {

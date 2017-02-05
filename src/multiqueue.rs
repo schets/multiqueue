@@ -87,7 +87,7 @@ impl<T> QueueRW<T> for MPMC<T> {
 
 #[derive(Clone, Copy)]
 enum QueueState {
-    Single,
+    Uni,
     Multi,
 }
 
@@ -155,7 +155,7 @@ pub struct FutInnerRecv<RW: QueueRW<T>, T> {
     prod_wait: Arc<FutWait>,
 }
 
-pub struct FutSingleInnerRecv<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> {
+pub struct FutUniInnerRecv<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> {
     reader: InnerRecv<RW, T>,
     wait: Arc<FutWait>,
     prod_wait: Arc<FutWait>,
@@ -216,7 +216,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
 
         let mwriter = InnerSend {
             queue: qarc.clone(),
-            state: Cell::new(QueueState::Single),
+            state: Cell::new(QueueState::Uni),
             token: qarc.manager.get_token(),
         };
 
@@ -337,7 +337,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         }
     }
 
-    pub fn try_recv_view<R, F: FnOnce(&T) -> R>
+    pub fn try_recv_view<R, F: FnOnce(&mut T) -> R>
         (&self,
          op: F,
          reader: &Reader)
@@ -399,11 +399,11 @@ impl<RW: QueueRW<T>, T> InnerSend<RW, T> {
             }
         }
         let val = match self.state.get() {
-            QueueState::Single => self.queue.try_send_single(val),
+            QueueState::Uni => self.queue.try_send_single(val),
             QueueState::Multi => {
                 if self.queue.writers.load(Relaxed) == 1 {
                     fence(Acquire);
-                    self.state.set(QueueState::Single);
+                    self.state.set(QueueState::Uni);
                     self.queue.try_send_single(val)
                 } else {
                     self.queue.try_send_multi(val)
@@ -412,7 +412,9 @@ impl<RW: QueueRW<T>, T> InnerSend<RW, T> {
         };
         // Putting this in the send functions
         // greatly confuses the compiler and literally halfs
-        // the performance of the queue
+        // the performance of the queue. I suspect the compiler
+        // always sets up a stack from regardless of the condition
+        // and that hurts optimizations around it.
         if val.is_ok() {
             if self.queue.needs_notify {
                 self.queue.waiter.notify();
@@ -463,32 +465,8 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
         self.reader.get_consumers() == 1
     }
 
-    /// Applies the passed function to the value in the queue without copying it out
-    /// If there is no data in the queue or the writers have disconnected,
-    /// returns an Err((F, TryRecvError))
-    ///
-    /// # Example
-    /// ```
-    /// use multiqueue::multiqueue;
-    ///
-    /// let (w, r) = multiqueue(10);
-    /// let single_r = r.into_single().unwrap();
-    /// for i in 0..5 {
-    ///     w.try_send(i).unwrap();
-    /// }
-    ///
-    /// for i in 0..5 {
-    ///     let val = match single_r.recv_view(|x| 1 + *x) {
-    ///         Ok(val) => val,
-    ///         Err(_) => panic!("Queue shouldn't be disconncted or empty"),
-    ///     };
-    ///     assert_eq!(i + 1, val);
-    /// }
-    /// drop(w);
-    /// assert!(single_r.recv_view(|x| *x).is_err());
-    /// ```
     #[inline(always)]
-    pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
+    pub fn try_recv_view<R, F: FnOnce(&mut T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
         self.examine_signals();
         match self.queue.try_recv_view(op, &self.reader) {
             Ok(v) => Ok(v),
@@ -496,31 +474,7 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
         }
     }
 
-    /// Applies the passed function to the value in the queue without copying it out
-    /// If there is no data in the queue, blocks until an item is pushed into the queue
-    /// or all writers disconnect
-    ///
-    /// # Example
-    /// ```
-    /// use multiqueue::multiqueue;
-    ///
-    /// let (w, r) = multiqueue(10);
-    /// let single_r = r.into_single().unwrap();
-    /// for i in 0..5 {
-    ///     w.try_send(i).unwrap();
-    /// }
-    ///
-    /// for i in 0..5 {
-    ///     let val = match single_r.recv_view(|x| 1 + *x) {
-    ///         Ok(val) => val,
-    ///         Err(_) => panic!("Queue shouldn't be disconncted or empty"),
-    ///     };
-    ///     assert_eq!(i + 1, val);
-    /// }
-    /// drop(w);
-    /// assert!(single_r.recv_view(|x| *x).is_err());
-    /// ```
-    pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, mut op: F) -> Result<R, (F, RecvError)> {
+    pub fn recv_view<R, F: FnOnce(&mut T) -> R>(&self, mut op: F) -> Result<R, (F, RecvError)> {
         self.examine_signals();
         loop {
             match self.queue.try_recv_view(op, &self.reader) {
@@ -537,62 +491,6 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
         }
     }
 
-    /// Adds a new data stream to the queue, starting at the same position
-    /// as the InnerRecv this is being called on.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use multiqueue::multiqueue;
-    /// let (w, r) = multiqueue(10);
-    /// w.try_send(1).unwrap();
-    /// assert_eq!(r.recv().unwrap(), 1);
-    /// w.try_send(1).unwrap();
-    /// let r2 = r.add_stream();
-    /// assert_eq!(r.recv().unwrap(), 1);
-    /// assert_eq!(r2.recv().unwrap(), 1);
-    /// assert!(r.try_recv().is_err());
-    /// assert!(r2.try_recv().is_err());
-    /// ```
-    ///
-    /// ```
-    /// use multiqueue::multiqueue;
-    ///
-    /// use std::thread;
-    ///
-    /// let (send, recv) = multiqueue(4);
-    /// let mut handles = vec![];
-    /// for i in 0..2 { // or n
-    ///     let cur_recv = recv.add_stream();
-    ///     handles.push(thread::spawn(move || {
-    ///         for val in cur_recv {
-    ///             println!("Stream {} got {}", i, val);
-    ///         }
-    ///     }));
-    /// }
-    ///
-    /// // Take notice that I drop the reader - this removes it from
-    /// // the queue, meaning that the readers in the new threads
-    /// // won't get starved by the lack of progress from recv
-    /// recv.unsubscribe();
-    ///
-    /// for i in 0..10 {
-    ///     // Don't do this busy loop in real stuff unless you're really sure
-    ///     loop {
-    ///         if send.try_send(i).is_ok() {
-    ///             break;
-    ///         }
-    ///     }
-    /// }
-    ///
-    /// // Drop the sender to close the queue
-    /// drop(send);
-    ///
-    /// for t in handles {
-    ///     t.join();
-    /// }
-    ///
-    /// ```
     pub fn add_stream(&self) -> InnerRecv<RW, T> {
         InnerRecv {
             queue: self.queue.clone(),
@@ -668,12 +566,12 @@ impl<RW: QueueRW<T>, T> FutInnerRecv<RW, T> {
         }
     }
 
-    /// Attempts to transform this receiver into a FutSingleInnerRecv
+    /// Attempts to transform this receiver into a FutUniInnerRecv
     /// calling the passed function on the input data.
     pub fn into_single<R, F: FnMut(&T) -> R>
         (self,
          op: F)
-         -> Result<FutSingleInnerRecv<RW, R, F, T>, (F, FutInnerRecv<RW, T>)> {
+         -> Result<FutUniInnerRecv<RW, R, F, T>, (F, FutInnerRecv<RW, T>)> {
         let new_mreader;
         let new_pwait = self.prod_wait.clone();
         let new_wait = self.wait.clone();
@@ -682,7 +580,7 @@ impl<RW: QueueRW<T>, T> FutInnerRecv<RW, T> {
             drop(self);
         }
         if new_mreader.is_single() {
-            Ok(FutSingleInnerRecv {
+            Ok(FutUniInnerRecv {
                 reader: new_mreader,
                 wait: new_wait,
                 prod_wait: new_pwait,
@@ -704,13 +602,13 @@ impl<RW: QueueRW<T>, T> FutInnerRecv<RW, T> {
     }
 }
 
-/// This struct acts as a SingleInnerRecv except operating as a futures Stream on incoming data
+/// This struct acts as a UniInnerRecv except operating as a futures Stream on incoming data
 ///
 /// Since this operates in an iterator-like manner on the data stream, it holds the function
 /// it calls and to use a different function must transform itself into a different
-/// FutSingleInnerRecv using transform_operation
-impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutSingleInnerRecv<RW, R, F, T> {
-    /// Identical to SingleInnerRecv::try_recv, uses operation held by FutSingleInnerRecv
+/// FutUniInnerRecv using transform_operation
+impl<RW: QueueRW<T>, R, F: FnMut(&mut T) -> R, T> FutUniInnerRecv<RW, R, F, T> {
+    /// Identical to UniInnerRecv::try_recv, uses operation held by FutUniInnerRecv
     #[inline(always)]
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
         let opref = &mut self.op;
@@ -719,12 +617,12 @@ impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutSingleInnerRecv<RW, R, F, T> {
         rval.map_err(|x| x.1)
     }
 
-    /// Adds another stream to the queue with a FutSingleInnerRecv using the passed function
-    pub fn add_stream_with<Q, FQ: FnMut(&T) -> Q>(&self,
+    /// Adds another stream to the queue with a FutUniInnerRecv using the passed function
+    pub fn add_stream_with<Q, FQ: FnMut(&mut T) -> Q>(&self,
                                                   op: FQ)
-                                                  -> FutSingleInnerRecv<RW, Q, FQ, T> {
+                                                  -> FutUniInnerRecv<RW, Q, FQ, T> {
         let rx = self.reader.add_stream();
-        FutSingleInnerRecv {
+        FutUniInnerRecv {
             reader: rx,
             wait: self.wait.clone(),
             prod_wait: self.prod_wait.clone(),
@@ -732,11 +630,11 @@ impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutSingleInnerRecv<RW, R, F, T> {
         }
     }
 
-    /// This transforms the receiver into another FutSingleInnerRecv
+    /// This transforms the receiver into another FutUniInnerRecv
     /// using a different function on the same stream
-    pub fn transform_operation<Q, FQ: FnMut(&T) -> Q>(self,
+    pub fn transform_operation<Q, FQ: FnMut(&mut T) -> Q>(self,
                                                       op: FQ)
-                                                      -> FutSingleInnerRecv<RW, Q, FQ, T> {
+                                                      -> FutUniInnerRecv<RW, Q, FQ, T> {
         // Don't know how to satisy borrowck without absurd pointer lies
         // and forgetting shenanigans. Would rather pay the cost of add_stream for this
         self.add_stream_with(op)
@@ -836,8 +734,8 @@ impl<RW: QueueRW<T>, T> Stream for FutInnerRecv<RW, T> {
     }
 }
 
-impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T: Clone + Sync> Stream
-    for FutSingleInnerRecv<RW, R, F, T> {
+impl<RW: QueueRW<T>, R, F: FnMut(&mut T) -> R, T: Clone + Sync> Stream
+    for FutUniInnerRecv<RW, R, F, T> {
     type Item = R;
     type Error = ();
 
@@ -1063,7 +961,7 @@ impl<RW: QueueRW<T>, T> Drop for FutInnerRecv<RW, T> {
     }
 }
 
-impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Drop for FutSingleInnerRecv<RW, R, F, T> {
+impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Drop for FutUniInnerRecv<RW, R, F, T> {
     fn drop(&mut self) {
         let prod_wait = self.prod_wait.clone();
         unsafe { self.reader.do_unsubscribe_with(|| { prod_wait.notify(); }) }
@@ -1083,7 +981,7 @@ unsafe impl<RW: QueueRW<T>, T> Send for InnerSend<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for InnerRecv<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for FutInnerSend<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for FutInnerRecv<RW, T> {}
-unsafe impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Send for FutSingleInnerRecv<RW, R, F, T> {}
+unsafe impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Send for FutUniInnerRecv<RW, R, F, T> {}
 
 
 
@@ -1332,7 +1230,7 @@ mod test {
     }
 
     #[test]
-    fn test_single_leav_multi() {
+    fn test_single_leave_multi() {
         let (writer, reader) = MultiQueue::new(10);
         let reader2 = reader.clone();
         writer.try_send(1).unwrap();
