@@ -155,7 +155,7 @@ pub struct FutInnerRecv<RW: QueueRW<T>, T> {
     prod_wait: Arc<FutWait>,
 }
 
-pub struct FutUniInnerRecv<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> {
+pub struct FutUniInnerRecv<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> {
     reader: InnerRecv<RW, T>,
     wait: Arc<FutWait>,
     prod_wait: Arc<FutWait>,
@@ -337,7 +337,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         }
     }
 
-    pub fn try_recv_view<R, F: FnOnce(&mut T) -> R>
+    pub fn try_recv_view<R, F: for<'r> FnOnce(&T) -> R>
         (&self,
          op: F,
          reader: &Reader)
@@ -466,7 +466,9 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
     }
 
     #[inline(always)]
-    pub fn try_recv_view<R, F: FnOnce(&mut T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
+    pub fn try_recv_view<R, F: for<'r> FnOnce(&T) -> R>(&self,
+                                                        op: F)
+                                                        -> Result<R, (F, TryRecvError)> {
         self.examine_signals();
         match self.queue.try_recv_view(op, &self.reader) {
             Ok(v) => Ok(v),
@@ -474,7 +476,7 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
         }
     }
 
-    pub fn recv_view<R, F: FnOnce(&mut T) -> R>(&self, mut op: F) -> Result<R, (F, RecvError)> {
+    pub fn recv_view<R, F: for<'r> FnOnce(&T) -> R>(&self, mut op: F) -> Result<R, (F, RecvError)> {
         self.examine_signals();
         loop {
             match self.queue.try_recv_view(op, &self.reader) {
@@ -568,7 +570,7 @@ impl<RW: QueueRW<T>, T> FutInnerRecv<RW, T> {
 
     /// Attempts to transform this receiver into a FutUniInnerRecv
     /// calling the passed function on the input data.
-    pub fn into_single<R, F: FnMut(&T) -> R>
+    pub fn into_single<R, F: for<'r> FnMut(&T) -> R>
         (self,
          op: F)
          -> Result<FutUniInnerRecv<RW, R, F, T>, (F, FutInnerRecv<RW, T>)> {
@@ -607,7 +609,7 @@ impl<RW: QueueRW<T>, T> FutInnerRecv<RW, T> {
 /// Since this operates in an iterator-like manner on the data stream, it holds the function
 /// it calls and to use a different function must transform itself into a different
 /// FutUniInnerRecv using transform_operation
-impl<RW: QueueRW<T>, R, F: FnMut(&mut T) -> R, T> FutUniInnerRecv<RW, R, F, T> {
+impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> FutUniInnerRecv<RW, R, F, T> {
     /// Identical to UniInnerRecv::try_recv, uses operation held by FutUniInnerRecv
     #[inline(always)]
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
@@ -618,9 +620,9 @@ impl<RW: QueueRW<T>, R, F: FnMut(&mut T) -> R, T> FutUniInnerRecv<RW, R, F, T> {
     }
 
     /// Adds another stream to the queue with a FutUniInnerRecv using the passed function
-    pub fn add_stream_with<Q, FQ: FnMut(&mut T) -> Q>(&self,
-                                                  op: FQ)
-                                                  -> FutUniInnerRecv<RW, Q, FQ, T> {
+    pub fn add_stream_with<Q, FQ: for<'r> FnMut(&T) -> Q>(&self,
+                                                          op: FQ)
+                                                          -> FutUniInnerRecv<RW, Q, FQ, T> {
         let rx = self.reader.add_stream();
         FutUniInnerRecv {
             reader: rx,
@@ -632,9 +634,9 @@ impl<RW: QueueRW<T>, R, F: FnMut(&mut T) -> R, T> FutUniInnerRecv<RW, R, F, T> {
 
     /// This transforms the receiver into another FutUniInnerRecv
     /// using a different function on the same stream
-    pub fn transform_operation<Q, FQ: FnMut(&mut T) -> Q>(self,
-                                                      op: FQ)
-                                                      -> FutUniInnerRecv<RW, Q, FQ, T> {
+    pub fn transform_operation<Q, FQ: for<'r> FnMut(&T) -> Q>(self,
+                                                              op: FQ)
+                                                              -> FutUniInnerRecv<RW, Q, FQ, T> {
         // Don't know how to satisy borrowck without absurd pointer lies
         // and forgetting shenanigans. Would rather pay the cost of add_stream for this
         self.add_stream_with(op)
@@ -734,7 +736,7 @@ impl<RW: QueueRW<T>, T> Stream for FutInnerRecv<RW, T> {
     }
 }
 
-impl<RW: QueueRW<T>, R, F: FnMut(&mut T) -> R, T: Clone + Sync> Stream
+impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T: Clone + Sync> Stream
     for FutUniInnerRecv<RW, R, F, T> {
     type Item = R;
     type Error = ();
@@ -961,7 +963,7 @@ impl<RW: QueueRW<T>, T> Drop for FutInnerRecv<RW, T> {
     }
 }
 
-impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Drop for FutUniInnerRecv<RW, R, F, T> {
+impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Drop for FutUniInnerRecv<RW, R, F, T> {
     fn drop(&mut self) {
         let prod_wait = self.prod_wait.clone();
         unsafe { self.reader.do_unsubscribe_with(|| { prod_wait.notify(); }) }

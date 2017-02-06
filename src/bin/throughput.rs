@@ -2,7 +2,7 @@ extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
-use multiqueue::{MulticastReceiver, MulticastSender, multicast_queue, wait};
+use multiqueue::{MulticastReceiver, MulticastSender, multicast_queue_with, wait};
 
 use time::precise_time_ns;
 
@@ -48,7 +48,7 @@ fn send(bar: &Barrier, writer: MulticastSender<u64>, num_push: usize) {
 
 fn runit(name: &str, n_senders: usize, n_readers: usize) {
     let num_do = 100000000;
-    let (writer, reader) = multiqueue_with(20000, wait::BusyWait::new());
+    let (writer, reader) = multicast_queue_with(20000, wait::BusyWait::new());
     let bar = Barrier::new(1 + n_senders + n_readers);
     let bref = &bar;
     let ns_atomic = AtomicUsize::new(0);

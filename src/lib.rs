@@ -298,7 +298,8 @@ mod multicast;
 mod read_cursor;
 pub mod wait;
 
-pub use multicast::{MulticastSender, MulticastReceiver, MulticastUniReceiver, multicast_queue};
+pub use multicast::{MulticastSender, MulticastReceiver, MulticastUniReceiver, multicast_queue,
+                    multicast_queue_with};
 
 use multiqueue::{InnerSend, InnerRecv, BCast, MPMC, MultiQueue};
 use countedindex::Index;
@@ -377,17 +378,16 @@ pub struct MPMCUniReceiver<T> {
 
 
 impl<T> MPMCSender<T> {
-
     /// Tries to send a value into the queue
     /// If there is no space, returns Err(TrySendError::Full(val))
     /// If there are no readers, returns Err(TrySendError::Disconnected(val))
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
-        self.writer.try_send(val)
+        self.sender.try_send(val)
     }
 
     /// Removes this writer from the queue
     pub fn unsubscribe(self) {
-        self.writer.unsubscribe()
+        self.sender.unsubscribe()
     }
 }
 
@@ -490,14 +490,12 @@ impl<T> MPMCUniReceiver<T> {
 
 
     /// Similar to UniMcastReceiver::try_recv_view, except this closure takes
-    /// a mutable reference to the data
-    pub fn try_recv_view<R, F: FnOnce(&mut T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
+    pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
         self.reader.try_recv_view(op)
     }
 
-    /// Similar to UniMcastReceiver::recv_view, except this closure takes
-    /// a mutable reference to the data
-    pub fn recv_view<R, F: FnOnce(&mut T) -> T>(&self, op: F) -> Result<R, (F, RecvError)> {
+    /// Similar to UniMcastReceiver::recv_view
+    pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, RecvError)> {
         self.reader.recv_view(op)
     }
 

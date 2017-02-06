@@ -5,7 +5,7 @@ use self::multiqueue::{multicast_queue, mpmc_queue};
 use self::crossbeam::scope;
 
 fn spsc_example() {
-    let (send, recv) = multiqueue(4);
+    let (send, recv) = multicast_queue(4);
     scope(|scope| {
         scope.spawn(move || for val in recv {
             println!("Got {}", val);
@@ -24,7 +24,7 @@ fn spsc_example() {
 }
 
 fn spsc_bcast_example() {
-    let (send, recv) = multiqueue(4);
+    let (send, recv) = multicast_queue(4);
     scope(|scope| {
         for i in 0..2 {
             // or n
@@ -55,7 +55,7 @@ fn spsc_bcast_example() {
 }
 
 fn spmc_bcast_example() {
-    let (send, recv) = multiqueue(4);
+    let (send, recv) = multicast_queue(4);
     scope(|scope| {
         for i in 0..2 {
             let cur_recv = recv.add_stream();
@@ -86,7 +86,7 @@ fn spmc_bcast_example() {
 }
 
 fn wacky_example() {
-    let (send, recv) = multiqueue(4);
+    let (send, recv) = multicast_queue(4);
     scope(|scope| {
         for i in 0..2 {
             let cur_recv = recv.add_stream();

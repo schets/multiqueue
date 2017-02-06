@@ -1,8 +1,9 @@
-use multiqueue::{InnerSend, InnerRecv, BCast, Multicast, MultiQueue};
 use countedindex::Index;
+use multiqueue::{InnerSend, InnerRecv, BCast, MultiQueue};
+use wait::Wait;
 
+use std::mem;
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
-
 
 /// This class is the sending half of the multicast Queue. It supports both
 /// single and multi consumer modes with competitive performance in each case.
@@ -118,7 +119,7 @@ pub struct MulticastSender<T: Clone> {
 /// // Stream 1 consumer 0 got 2
 /// // etc
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MulticastReceiver<T: Clone> {
     reader: InnerRecv<BCast<T>, T>,
 }
@@ -151,8 +152,18 @@ pub struct MulticastUniReceiver<T: Clone + Sync> {
     reader: InnerRecv<BCast<T>, T>,
 }
 
-impl<T: Clone> MulticastReceiver<T> {
+impl<T: Clone> MulticastSender<T> {
+    #[inline(always)]
+    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
+        self.sender.try_send(val)
+    }
 
+    pub fn unsubscribe(self) {
+        self.sender.unsubscribe();
+    }
+}
+
+impl<T: Clone> MulticastReceiver<T> {
     /// Tries to receive a value from the queue without blocking.
     ///
     /// # Examples:
@@ -185,10 +196,12 @@ impl<T: Clone> MulticastReceiver<T> {
     ///
     /// handle.join();
     /// ```
+    #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.reader.try_recv()
     }
 
+    #[inline(always)]
     pub fn recv(&self) -> Result<T, RecvError> {
         self.reader.recv()
     }
@@ -277,13 +290,25 @@ impl<T: Clone> MulticastReceiver<T> {
     }
 }
 
+impl<T: Clone + Sync> MulticastReceiver<T> {
+    pub fn into_single(self) -> Result<MulticastUniReceiver<T>, MulticastReceiver<T>> {
+        if self.reader.is_single() {
+            Ok(MulticastUniReceiver { reader: self.reader })
+        } else {
+            Err(self)
+        }
+    }
+}
+
 impl<T: Clone + Sync> MulticastUniReceiver<T> {
     /// Identical to MulticastReceiver::try_recv
+    #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.reader.try_recv()
     }
 
     /// Identical to MulticastReceiver::recv
+    #[inline(always)]
     pub fn recv(&self) -> Result<T, RecvError> {
         self.reader.recv()
     }
@@ -313,9 +338,9 @@ impl<T: Clone + Sync> MulticastUniReceiver<T> {
     /// drop(w);
     /// assert!(single_r.try_recv_view(|x| *x).is_err());
     /// ```
+    #[inline(always)]
     pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
-        let mut_w = |v: &mut T| op(v);
-        self.reader.try_recv_view(mut_w)
+        self.reader.try_recv_view(op)
     }
 
     /// Applies the passed function to the value in the queue without copying it out
@@ -342,9 +367,9 @@ impl<T: Clone + Sync> MulticastUniReceiver<T> {
     /// drop(w);
     /// assert!(single_r.recv_view(|x| *x).is_err());
     /// ```
+    #[inline(always)]
     pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, RecvError)> {
-        let mut_w = |v: &mut T| op(v);
-        self.reader.recv_view(mut_w)
+        self.reader.recv_view(op)
     }
 
     /// Almost identical to MulticastReceiver::unsubscribe, except it doesn't
@@ -353,10 +378,34 @@ impl<T: Clone + Sync> MulticastUniReceiver<T> {
     pub fn unsubscribe(self) {
         self.reader.unsubscribe();
     }
+
+    pub fn iter_with<R, F: FnMut(&T) -> R>(self, op: F) -> MulticastUniIter<R, F, T> {
+        MulticastUniIter {
+            recv: self,
+            op: op,
+        }
+    }
+
+    pub fn partial_iter_with<'a, R, F: FnMut(&T) -> R>(&'a self,
+                                                       op: F)
+                                                       -> MulticastUniRefIter<'a, R, F, T> {
+        MulticastUniRefIter {
+            recv: self,
+            op: op,
+        }
+    }
 }
 
 pub fn multicast_queue<T: Clone>(capacity: Index) -> (MulticastSender<T>, MulticastReceiver<T>) {
     let (send, recv) = MultiQueue::<BCast<T>, T>::new(capacity);
+    (MulticastSender { sender: send }, MulticastReceiver { reader: recv })
+}
+
+pub fn multicast_queue_with<T: Clone, W: Wait + 'static>
+    (capacity: Index,
+     wait: W)
+     -> (MulticastSender<T>, MulticastReceiver<T>) {
+    let (send, recv) = MultiQueue::<BCast<T>, T>::new_with(capacity, wait);
     (MulticastSender { sender: send }, MulticastReceiver { reader: recv })
 }
 
@@ -371,6 +420,7 @@ pub struct MulticastIter<T: Clone> {
 impl<T: Clone> Iterator for MulticastIter<T> {
     type Item = T;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<T> {
         match self.recv.recv() {
             Ok(val) => Some(val),
@@ -386,5 +436,57 @@ impl<T: Clone> IntoIterator for MulticastReceiver<T> {
 
     fn into_iter(self) -> MulticastIter<T> {
         MulticastIter { recv: self }
+    }
+}
+
+pub struct MulticastRefIter<'a, T: Clone + 'a> {
+    recv: &'a MulticastReceiver<T>,
+}
+
+impl<'a, T: Clone + 'a> Iterator for MulticastRefIter<'a, T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        match self.recv.try_recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+pub struct MulticastUniIter<R, F: FnMut(&T) -> R, T: Clone + Sync> {
+    recv: MulticastUniReceiver<T>,
+    op: F,
+}
+
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Iterator for MulticastUniIter<R, F, T> {
+    type Item = R;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<R> {
+        let opref = &mut self.op;
+        match self.recv.recv_view(|v| opref(v)) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+pub struct MulticastUniRefIter<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> {
+    recv: &'a MulticastUniReceiver<T>,
+    op: F,
+}
+
+impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> Iterator for MulticastUniRefIter<'a, R, F, T> {
+    type Item = R;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<R> {
+        let opref = &mut self.op;
+        match self.recv.recv_view(|v| opref(v)) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
     }
 }
