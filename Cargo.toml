@@ -8,6 +8,7 @@ repository = "https://github.com/schets/multiqueue"
 documentation = "https://docs.rs/multiqueue"
 readme = "Readme.md"
 keywords = ["queue", "mpmc", "lockless", "broadcast", "message"]
+categories = ['asynchronous', 'concurrency', 'data-structures', 'algorithms']
 
 
 [dependencies]
