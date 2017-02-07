@@ -43,6 +43,7 @@ On the other hand, you would want to use a channel/sync_channel if you:
   * Truly want an unbounded queue, although you should probably handle backlog instead
   * Need senders to block when the queue is full and can't use the futures api
   * Don't want the memory usage of a large buffer
+  * You need a oneshot queue
   * You very frequently add/remove producers/consumers
 
 Otherwise, in most cases, MultiQueue should be a good replacement for channels.

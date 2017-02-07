@@ -824,7 +824,7 @@ impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> Iterator for BroadcastUniRe
     }
 }
 
-/// Creates a (BroadcastSender, BroadcastReceiver) pair with a capacity that's
+/// Creates a (```BroadcastSender```, ```BroadcastReceiver```) pair with a capacity that's
 /// the next power of two >= the given capacity
 ///
 /// # Example
@@ -839,7 +839,7 @@ pub fn broadcast_queue<T: Clone>(capacity: Index) -> (BroadcastSender<T>, Broadc
     (BroadcastSender { sender: send }, BroadcastReceiver { receiver: recv })
 }
 
-/// Creates a (BroadcastSender, BroadcastReceiver) pair with a capacity that's
+/// Creates a (```BroadcastSender```, ```BroadcastReceiver```) pair with a capacity that's
 /// the next power of two >= the given capacity and the specified wait strategy
 ///
 /// # Example

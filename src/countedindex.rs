@@ -49,7 +49,7 @@ pub fn get_valid_wrap(val: Index) -> Index {
     if val >= MAX_WRAP {
         MAX_WRAP
     } else if val == 0 {
-        2
+        1
     } else {
         val.next_power_of_two()
     }

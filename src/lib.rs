@@ -5,7 +5,7 @@
 //!
 //!   * It can dynamically add/remove senders, and each stream can have multiple receivers
 //!
-//!   * It has fast runtime fallbacks for whenr there's a single consumer and/or a single producer
+//!   * It has fast runtime fallbacks for when there's a single consumer and/or a single producer
 //!
 //!   * It works on 32 bit systems without any performance or capability penalty
 //!
@@ -19,7 +19,9 @@
 //! There's an incoming FIFO data stream that is broadcast to a set of subscribers
 //! as if there were multiple streams being written to.
 //! There are two main differences:
+//!
 //!   * ```MultiQueue``` transparently supports switching between single and multiple producers.
+//!
 //!   * Each broadcast stream can be shared among multiple consumers.
 //!
 //! The last part makes the model a bit confusing, since there's a difference between a
@@ -175,7 +177,7 @@
 //!
 //! ```
 //!
-//! //! # Example: SPMC broadcast
+//! # Example: SPMC broadcast
 //!
 //! ```
 //! extern crate multiqueue;
