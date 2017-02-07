@@ -64,7 +64,7 @@ pub struct MPMCSender<T> {
 /// This is the receiving end of a standard mpmc view of the queue
 /// It functions similarly to the broadcast queue execpt there
 /// is only ever one stream. As a result, the type doesn't need to be clone
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MPMCReceiver<T> {
     reader: InnerRecv<MPMC<T>, T>,
 }
@@ -170,6 +170,14 @@ impl<T> MPMCReceiver<T> {
     /// ```
     pub fn unsubscribe(self) -> bool {
         self.reader.unsubscribe()
+    }
+
+    pub fn into_single(self) -> Result<MPMCUniReceiver<T>, MPMCReceiver<T>> {
+        if self.reader.is_single() {
+            Ok(MPMCUniReceiver { reader: self.reader })
+        } else {
+            Err(self)
+        }
     }
 }
 
@@ -348,7 +356,6 @@ impl<T> MPMCFutSender<T> {
 }
 
 impl<T> MPMCFutReceiver<T> {
-
     /// Equivalent to MPMCReceiver::try_recv
     #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -368,7 +375,6 @@ impl<T> MPMCFutReceiver<T> {
 }
 
 impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
-
     /// Equivalent to MPMCReceiver::try_recv using the held operation
     #[inline(always)]
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
@@ -419,5 +425,217 @@ impl<R, F: FnMut(&T) -> R, T> Stream for MPMCFutUniReceiver<R, F, T> {
     #[inline(always)]
     fn poll(&mut self) -> Poll<Option<R>, ()> {
         self.receiver.poll()
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use super::mpmc_queue;
+
+    extern crate crossbeam;
+    use self::crossbeam::scope;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::sync::mpsc::TryRecvError;
+    use std::thread::yield_now;
+
+    #[test]
+    fn build_queue() {
+        let _ = mpmc_queue::<usize>(10);
+    }
+
+    #[test]
+    fn push_pop_test() {
+        let (writer, reader) = mpmc_queue(1);
+        for _ in 0..100 {
+            assert!(reader.try_recv().is_err());
+            writer.try_send(1 as usize).expect("Push should succeed");
+            assert!(writer.try_send(1).is_err());
+            assert_eq!(1, reader.try_recv().unwrap());
+        }
+    }
+
+    fn mpsc(senders: usize, receivers: usize) {
+        let (writer, reader) = mpmc_queue(4);
+        let sreader = reader.into_single().unwrap();
+        let myb = Barrier::new(receivers + senders);
+        let bref = &myb;
+        let num_loop = 100000;
+        scope(|scope| {
+            for q in 0..senders {
+                let cur_writer = writer.clone();
+                scope.spawn(move || {
+                    bref.wait();
+                    'outer: for i in 0..num_loop {
+                        for _ in 0..100000000 {
+                            if cur_writer.try_send((q, i)).is_ok() {
+                                continue 'outer;
+                            }
+                            yield_now();
+                        }
+                        assert!(false, "Writer could not write");
+                    }
+                });
+            }
+            writer.unsubscribe();
+            scope.spawn(move || {
+                let mut myv = Vec::new();
+                for _ in 0..senders {
+                    myv.push(0);
+                }
+                bref.wait();
+                for _ in 0..num_loop * senders {
+                    loop {
+                        if let Ok(val) = sreader.try_recv_view(|x| *x) {
+                            assert_eq!(myv[val.0], val.1);
+                            myv[val.0] += 1;
+                            break;
+                        }
+                        yield_now();
+                    }
+                }
+                for val in myv {
+                    if val != num_loop {
+                        panic!("Wrong number of values obtained for this");
+                    }
+                }
+                assert!(sreader.try_recv().is_err());
+            });
+        });
+    }
+
+    #[test]
+    fn test_spsc() {
+        mpsc(1, 1);
+    }
+
+    #[test]
+    fn test_mpsc() {
+        mpsc(2, 1);
+    }
+
+    fn mpmc(senders: usize, receivers: usize) {
+        let (writer, reader) = mpmc_queue(10);
+        let myb = Barrier::new(receivers + senders);
+        let bref = &myb;
+        let num_loop = 1000000;
+        let counter = AtomicUsize::new(0);
+        let cref = &counter;
+        scope(|scope| {
+            for _ in 0..senders {
+                let cur_writer = writer.clone();
+                scope.spawn(move || {
+                    bref.wait();
+                    'outer: for _ in 0..num_loop {
+                        for _ in 0..100000000 {
+                            if cur_writer.try_send(1).is_ok() {
+                                continue 'outer;
+                            }
+                            yield_now();
+                        }
+                        assert!(false, "Writer could not write");
+                    }
+                });
+            }
+            writer.unsubscribe();
+            for _ in 0..receivers {
+                let this_reader = reader.clone();
+                scope.spawn(move || {
+                    bref.wait();
+                    loop {
+                        match this_reader.try_recv() {
+                            Ok(_) => {
+                                cref.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(TryRecvError::Disconnected) => break,
+                            _ => yield_now(),
+                        }
+                    }
+                });
+            }
+            reader.unsubscribe();
+        });
+        assert_eq!(senders * num_loop,
+                   counter.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_spmc() {
+        mpmc(1, 2);
+    }
+
+    #[test]
+    fn test_mpmc() {
+        mpmc(2, 2);
+    }
+
+    #[test]
+    fn test_baddrop() {
+        // This ensures that a bogus arc isn't dropped from the queue
+        let (writer, reader) = mpmc_queue(1);
+        for _ in 0..10 {
+            writer.try_send(Arc::new(10)).unwrap();
+            reader.recv().unwrap();
+        }
+    }
+
+
+    struct Dropper<'a> {
+        aref: &'a AtomicUsize,
+    }
+
+    impl<'a> Dropper<'a> {
+        pub fn new(a: &AtomicUsize) -> Dropper {
+            a.fetch_add(1, Ordering::Relaxed);
+            Dropper { aref: a }
+        }
+    }
+
+    impl<'a> Drop for Dropper<'a> {
+        fn drop(&mut self) {
+            self.aref.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl<'a> Clone for Dropper<'a> {
+        fn clone(&self) -> Dropper<'a> {
+            self.aref.fetch_add(1, Ordering::Relaxed);
+            Dropper { aref: self.aref }
+        }
+    }
+
+    #[test]
+    fn test_gooddrop() {
+        // This counts the # of drops and creations
+        let count = AtomicUsize::new(0);
+        {
+            let (writer, reader) = mpmc_queue(1);
+            for _ in 0..10 {
+                writer.try_send(Dropper::new(&count)).unwrap();
+                reader.recv().unwrap();
+            }
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_iterator_comp() {
+        let (writer, reader) = mpmc_queue::<usize>(10);
+        drop(writer);
+        for _ in reader {}
+    }
+
+    #[test]
+    fn test_single_leave_multi() {
+        let (writer, reader) = mpmc_queue::<usize>(10);
+        let reader2 = reader.clone();
+        writer.try_send(1).unwrap();
+        writer.try_send(1).unwrap();
+        assert_eq!(reader2.recv().unwrap(), 1);
+        drop(reader2);
+        let reader_s = reader.into_single().unwrap();
+        assert!(reader_s.recv_view(|x| *x).is_ok());
     }
 }

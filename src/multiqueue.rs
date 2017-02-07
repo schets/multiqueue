@@ -981,13 +981,15 @@ impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Drop for FutInnerUniRecv<R
 
 impl<RW: QueueRW<T>, T> fmt::Debug for InnerRecv<RW, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Multireader generic error message!")
+        write!(f,
+               "MultiQueue error message - you probably tried to unwrap the result of into_single")
     }
 }
 
 impl<RW: QueueRW<T>, T> fmt::Debug for FutInnerRecv<RW, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Multireader generic error message!")
+        write!(f,
+               "MultiQueue error message - you probably tried to unwrap the result of into_single")
     }
 }
 
