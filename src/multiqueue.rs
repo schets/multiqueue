@@ -1,6 +1,7 @@
 
 use std::any::Any;
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
@@ -167,7 +168,7 @@ pub struct FutInnerUniRecv<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> {
 struct FutWait {
     spins_first: usize,
     spins_yield: usize,
-    parked: parking_lot::Mutex<Vec<Task>>,
+    parked: parking_lot::Mutex<VecDeque<Task>>,
 }
 
 impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
@@ -620,7 +621,7 @@ impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutInnerUniRecv<RW, R, F, T> {
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
         let opref = &mut self.op;
         let rval = self.reader.try_recv_view(|tr| opref(tr));
-        self.prod_wait.notify();
+        self.prod_wait.notify_one();
         rval.map_err(|x| x.1)
     }
 
@@ -629,7 +630,7 @@ impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutInnerUniRecv<RW, R, F, T> {
     pub fn recv(&mut self) -> Result<R, RecvError> {
         let opref = &mut self.op;
         let rval = self.reader.recv_view(|tr| opref(tr));
-        self.prod_wait.notify();
+        self.prod_wait.notify_one();
         rval.map_err(|x| x.1)
     }
 
@@ -734,7 +735,7 @@ impl<RW: QueueRW<T>, T> Stream for FutInnerRecv<RW, T> {
         loop {
             match self.reader.queue.try_recv(&self.reader.reader) {
                 Ok(msg) => {
-                    self.prod_wait.notify();
+                    self.prod_wait.notify_one();
                     return Ok(Async::Ready(Some(msg)));
                 }
                 Err((_, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
@@ -762,7 +763,7 @@ impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Stream for FutInnerUniRecv
                 .queue
                 .try_recv_view(opref, &self.reader.reader) {
                 Ok(msg) => {
-                    self.prod_wait.notify();
+                    self.prod_wait.notify_one();
                     return Ok(Async::Ready(Some(msg)));
                 }
                 Err((_, _, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
@@ -789,7 +790,7 @@ impl FutWait {
         FutWait {
             spins_first: spins_first,
             spins_yield: spins_yield,
-            parked: parking_lot::Mutex::new(Vec::new()),
+            parked: parking_lot::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -818,7 +819,7 @@ impl FutWait {
         if check(seq, at, wc) {
             return false;
         }
-        parked.push(park());
+        parked.push_back(park());
         return true;
     }
 
@@ -844,10 +845,21 @@ impl FutWait {
         let mut parked = self.parked.lock();
         match f(val) {
             Err(TrySendError::Full(v)) => {
-                parked.push(park());
+                parked.push_back(park());
                 return Err(TrySendError::Full(v));
             }
             v => return v,
+        }
+    }
+
+    fn notify_one(&self) {
+        let mut parked = self.parked.lock();
+        match parked.pop_front() {
+            Some(val) => {
+                drop(parked);
+                val.unpark();
+            }
+            None => (),
         }
     }
 }
@@ -868,9 +880,7 @@ impl Wait for FutWait {
             } else {
                 let mut inline_v = smallvec::SmallVec::<[Task; 9]>::new();
                 inline_v.extend(parked.drain(..));
-                {
-                    let _destruct = parked;
-                }
+                drop(parked);
                 for val in inline_v.drain() {
                     val.unpark();
                 }
@@ -882,8 +892,6 @@ impl Wait for FutWait {
         true
     }
 }
-
-
 
 //////// Clone implementations
 
@@ -1000,9 +1008,8 @@ unsafe impl<RW: QueueRW<T>, T> Send for FutInnerSend<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for FutInnerRecv<RW, T> {}
 unsafe impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Send for FutInnerUniRecv<RW, R, F, T> {}
 
-pub fn futures_multiqueue<RW: QueueRW<T>, T>
-    (capacity: Index)
-     -> (FutInnerSend<RW, T>, FutInnerRecv<RW, T>) {
+pub fn futures_multiqueue<RW: QueueRW<T>, T>(capacity: Index)
+                                             -> (FutInnerSend<RW, T>, FutInnerRecv<RW, T>) {
     let cons_arc = Arc::new(FutWait::new());
     let prod_arc = Arc::new(FutWait::new());
     let (tx, rx) = MultiQueue::new_internal(capacity, cons_arc.clone());
