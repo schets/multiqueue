@@ -161,7 +161,7 @@ pub struct FutInnerUniRecv<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> {
     reader: InnerRecv<RW, T>,
     wait: Arc<FutWait>,
     prod_wait: Arc<FutWait>,
-    op: F,
+    pub op: F,
 }
 
 struct FutWait {
@@ -644,19 +644,18 @@ impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutInnerUniRecv<RW, R, F, T> {
         }
     }
 
-    /// This transforms the receiver into another FutInnerUniRecv
-    /// using a different function on the same stream
-    pub fn transform_operation<Q, FQ: FnMut(&T) -> Q>(self,
-                                                      op: FQ)
-                                                      -> FutInnerUniRecv<RW, Q, FQ, T> {
-        // Don't know how to satisy borrowck without absurd pointer lies
-        // and forgetting shenanigans. Would rather pay the cost of add_stream for this
-        self.add_stream_with(op)
-    }
-
     /// Identical to InnerRecv::unsubscribe()
     pub fn unsubscribe(self) -> bool {
         self.reader.reader.get_consumers() == 1
+    }
+
+    pub fn into_multi(self) -> FutInnerRecv<RW, T> {
+        let new_reader = self.reader.add_stream();
+        FutInnerRecv {
+            reader: new_reader,
+            wait: self.wait.clone(),
+            prod_wait: self.prod_wait.clone(),
+        }
     }
 }
 

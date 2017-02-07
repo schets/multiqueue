@@ -66,7 +66,7 @@ pub struct MPMCSender<T> {
 /// is only ever one stream. As a result, the type doesn't need to be clone
 #[derive(Clone, Debug)]
 pub struct MPMCReceiver<T> {
-    reader: InnerRecv<MPMC<T>, T>,
+    receiver: InnerRecv<MPMC<T>, T>,
 }
 
 
@@ -75,7 +75,7 @@ pub struct MPMCReceiver<T> {
 /// It functions similarly to the broadcast queue UniReceiver execpt there
 /// is only ever one stream. As a result, the type doesn't need to be clone or sync
 pub struct MPMCUniReceiver<T> {
-    reader: InnerRecv<MPMC<T>, T>,
+    receiver: InnerRecv<MPMC<T>, T>,
 }
 
 /// This is the futures-compatible version of MPMCSender
@@ -93,7 +93,9 @@ pub struct MPMCFutReceiver<T> {
 }
 
 /// This is the futures-compatible version of MPMCUniReceiver
-/// It implements Stream and behaves like the iterator would
+/// It implements Stream and behaves like the iterator would.
+/// To use a different function must transform itself into a different
+/// UniRecveiver use transform_operation
 pub struct MPMCFutUniReceiver<R, F: FnMut(&T) -> R, T> {
     receiver: FutInnerUniRecv<MPMC<T>, R, F, T>,
 }
@@ -131,9 +133,18 @@ impl<T> MPMCReceiver<T> {
     /// let (send, recv) = mpmc_queue(10);
     ///
     /// let handle = thread::spawn(move || {
-    ///     for val in recv {
-    ///         println!("Got {}", val);
+    ///     for _ in 0..10 {
+    ///         loop {
+    ///             match recv.try_recv() {
+    ///                 Ok(val) => {
+    ///                     println!("Got {}", val);
+    ///                     break;
+    ///                 },
+    ///                 Err(_) => (),
+    ///             }
+    ///         }
     ///     }
+    ///     assert!(recv.try_recv().is_err()); // recv would block here
     /// });
     ///
     /// for i in 0..10 {
@@ -145,13 +156,49 @@ impl<T> MPMCReceiver<T> {
     ///
     /// handle.join();
     /// ```
-
+    #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.reader.try_recv()
+        self.receiver.try_recv()
     }
 
+    /// Receives a value from the queue, blocks until there is data.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    /// let (w, r) = mpmc_queue(10);
+    /// w.try_send(1).unwrap();
+    /// assert_eq!(1, r.recv().unwrap());
+    /// ```
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    /// use std::thread;
+    ///
+    /// let (send, recv) = mpmc_queue(10);
+    ///
+    /// let handle = thread::spawn(move || {
+    ///     // note the lack of dealing with failed reads.
+    ///     // unwrap 'ignores' the error where sender disconnects
+    ///     for _ in 0..10 {
+    ///         println!("Got {}", recv.recv().unwrap());
+    ///     }
+    ///     assert!(recv.try_recv().is_err());
+    /// });
+    ///
+    /// for i in 0..10 {
+    ///     send.try_send(i).unwrap();
+    /// }
+    ///
+    /// // Drop the sender to close the queue
+    /// drop(send);
+    ///
+    /// handle.join();
+    /// ```
+    #[inline(always)]
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.reader.recv()
+        self.receiver.recv()
     }
 
     /// Removes the given reader from the queue subscription lib
@@ -169,63 +216,127 @@ impl<T> MPMCReceiver<T> {
     /// assert!(writer.try_send(1).is_err());
     /// ```
     pub fn unsubscribe(self) -> bool {
-        self.reader.unsubscribe()
+        self.receiver.unsubscribe()
     }
 
+    /// If there is only one Receiver on the stream, converts the
+    /// Receiver into a SingleReceiver otherwise returns the Receiver.
+    ///
+    /// # Example:
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    ///
+    /// let (w, r) = mpmc_queue(10);
+    /// w.try_send(1).unwrap();
+    /// let r2 = r.clone();
+    /// // Fails since there's two receivers on the stream
+    /// assert!(r2.into_single().is_err());
+    /// let single_r = r.into_single().unwrap();
+    /// let val = match single_r.try_recv_view(|x| 2 * *x) {
+    ///     Ok(val) => val,
+    ///     Err(_) => panic!("Queue should have an element"),
+    /// };
+    /// assert_eq!(2, val);
+    /// ```
     pub fn into_single(self) -> Result<MPMCUniReceiver<T>, MPMCReceiver<T>> {
-        if self.reader.is_single() {
-            Ok(MPMCUniReceiver { reader: self.reader })
+        if self.receiver.is_single() {
+            Ok(MPMCUniReceiver { receiver: self.receiver })
         } else {
             Err(self)
         }
     }
-}
 
-/*
-/// If there is only one InnerRecv on the stream, converts the
-/// InnerRecv into a UniInnerRecv otherwise returns the InnerRecv.
-///
-/// # Example:
-///
-/// ```
-/// use multiqueue::mpmc_queue;
-///
-/// let (w, r) = mpmc_queue(10);
-/// w.try_send(1).unwrap();
-/// let r2 = r.clone();
-/// // Fails since there's two receivers on the stream
-/// assert!(r2.into_single().is_err());
-/// let single_r = r.into_single().unwrap();
-/// let val = match single_r.try_recv_view(|x| 2 * *x) {
-///     Ok(val) => val,
-///     Err(_) => panic!("Queue should have an element"),
-/// };
-/// assert_eq!(2, val);
-//    pub fn into_single(&self) -> Result<Receiver<T>, Sender<T>> {
-//
-//   }
- */
+    /// Returns a non-owning iterator that iterates over the queue
+    /// until it fails to receive an item, either through being empty
+    /// or begin disconnected. This iterator will never block.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    /// let (w, r) = mpmc_queue(2);
+    /// for _ in 0 .. 3 {
+    ///     w.try_send(1).unwrap();
+    ///     w.try_send(2).unwrap();
+    ///     for val in r.try_iter().zip(1..2) {
+    ///         assert_eq!(val.0, val.1);
+    ///     }
+    /// }
+    /// ```
+    pub fn try_iter<'a>(&'a self) -> MPMCRefIter<'a, T> {
+        MPMCRefIter { recv: self }
+    }
+}
 
 impl<T> MPMCUniReceiver<T> {
     /// Identical to MPMCReceiver::try_recv
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.reader.try_recv()
+        self.receiver.try_recv()
     }
 
     /// Identical to MPMCReceiver::recv
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.reader.recv()
+        self.receiver.recv()
     }
 
 
-    /// Similar to UniMcastReceiver::try_recv_view, except this closure takes
+    /// Applies the passed function to the value in the queue without copying it out
+    /// If there is no data in the queue or the writers have disconnected,
+    /// returns an Err((F, TryRecvError))
+    ///
+    /// # Example
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    ///
+    /// let (w, r) = mpmc_queue(10);
+    /// let single_r = r.into_single().unwrap();
+    /// for i in 0..5 {
+    ///     w.try_send(i).unwrap();
+    /// }
+    ///
+    /// for i in 0..5 {
+    ///     let val = match single_r.try_recv_view(|x| 1 + *x) {
+    ///         Ok(val) => val,
+    ///         Err(_) => panic!("Queue shouldn't be disconncted or empty"),
+    ///     };
+    ///     assert_eq!(i + 1, val);
+    /// }
+    /// assert!(single_r.try_recv_view(|x| *x).is_err());
+    /// drop(w);
+    /// assert!(single_r.try_recv_view(|x| *x).is_err());
+    /// ```
+    #[inline(always)]
     pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
-        self.reader.try_recv_view(op)
+        self.receiver.try_recv_view(op)
     }
 
-    /// Similar to UniMcastReceiver::recv_view
+    /// Applies the passed function to the value in the queue without copying it out
+    /// If there is no data in the queue, blocks until an item is pushed into the queue
+    /// or all writers disconnect
+    ///
+    /// # Example
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    ///
+    /// let (w, r) = mpmc_queue(10);
+    /// let single_r = r.into_single().unwrap();
+    /// for i in 0..5 {
+    ///     w.try_send(i).unwrap();
+    /// }
+    ///
+    /// for i in 0..5 {
+    ///     let val = match single_r.recv_view(|x| 1 + *x) {
+    ///         Ok(val) => val,
+    ///         Err(_) => panic!("Queue shouldn't be disconncted or empty"),
+    ///     };
+    ///     assert_eq!(i + 1, val);
+    /// }
+    /// drop(w);
+    /// assert!(single_r.recv_view(|x| *x).is_err());
+    /// ```
     pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, RecvError)> {
-        self.reader.recv_view(op)
+        self.receiver.recv_view(op)
     }
 
     /// Removes the given reader from the queue subscription lib
@@ -243,7 +354,77 @@ impl<T> MPMCUniReceiver<T> {
     /// assert!(writer.try_send(1).is_err());
     /// ```
     pub fn unsubscribe(self) -> bool {
-        self.reader.unsubscribe()
+        self.receiver.unsubscribe()
+    }
+
+    /// Transforms the UniReceiver into a Receiver
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    ///
+    /// let (w, r) = mpmc_queue(10);
+    /// w.try_send(1).unwrap();
+    /// let single_r = r.into_single().unwrap();
+    /// let normal_r = single_r.into_multi();
+    /// normal_r.clone();
+    /// ```
+    pub fn into_multi(self) -> MPMCReceiver<T> {
+        MPMCReceiver {
+            receiver: self.receiver,
+        }
+    }
+
+    /// Returns a non-owning iterator that iterates over the queue
+    /// until it fails to receive an item, either through being empty
+    /// or begin disconnected. This iterator will never block.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    /// let (w, r) = mpmc_queue(2);
+    /// let sr = r.into_single().unwrap();
+    /// w.try_send(1).unwrap();
+    /// w.try_send(2).unwrap();
+    /// w.unsubscribe();
+    /// for val in sr.iter_with(|x| 2 * *x).zip(1..2) {
+    ///     assert_eq!(val.0, val.1 * 2);
+    /// }
+    /// ```
+    pub fn iter_with<R, F: FnMut(&T) -> R>(self, op: F) -> MPMCUniIter<R, F, T> {
+        MPMCUniIter {
+            recv: self,
+            op: op,
+        }
+    }
+
+    /// Returns a non-owning iterator that iterates over the queue
+    /// until it fails to receive an item, either through being empty
+    /// or begin disconnected. This iterator will never block.
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// use multiqueue::mpmc_queue;
+    /// let (w, r) = mpmc_queue(2);
+    /// let sr = r.into_single().unwrap();
+    /// for _ in 0 .. 3 {
+    ///     w.try_send(1).unwrap();
+    ///     w.try_send(2).unwrap();
+    ///     for val in sr.try_iter_with(|x| 2 * *x).zip(1..2) {
+    ///         assert_eq!(val.0, val.1*2);
+    ///     }
+    /// }
+    /// ```
+    pub fn try_iter_with<'a, R, F: FnMut(&T) -> R>(&'a self,
+                                                       op: F)
+                                                       -> MPMCUniRefIter<'a, R, F, T> {
+        MPMCUniRefIter {
+            recv: self,
+            op: op,
+        }
     }
 }
 
@@ -273,6 +454,32 @@ impl<T> IntoIterator for MPMCReceiver<T> {
     }
 }
 
+pub struct MPSCIter<T> {
+    recv: MPMCUniReceiver<T>,
+}
+
+impl<T> Iterator for MPSCIter<T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        match self.recv.recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<T> IntoIterator for MPMCUniReceiver<T> {
+    type Item = T;
+
+    type IntoIter = MPSCIter<T>;
+
+    fn into_iter(self) -> MPSCIter<T> {
+        MPSCIter { recv: self }
+    }
+}
+
 pub struct MPMCRefIter<'a, T: 'a> {
     recv: &'a MPMCReceiver<T>,
 }
@@ -282,7 +489,7 @@ impl<'a, T> Iterator for MPMCRefIter<'a, T> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<T> {
-        match self.recv.recv() {
+        match self.recv.try_recv() {
             Ok(val) => Some(val),
             Err(_) => None,
         }
@@ -299,12 +506,38 @@ impl<'a, T: 'a> IntoIterator for &'a MPMCReceiver<T> {
     }
 }
 
-pub struct MPMCUniRefIter<'a, R, F: FnMut(&T) -> R, T: 'a> {
+pub struct MPSCRefIter<'a, T: 'a> {
     recv: &'a MPMCUniReceiver<T>,
+}
+
+impl<'a, T> Iterator for MPSCRefIter<'a, T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        match self.recv.try_recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<'a, T: 'a> IntoIterator for &'a MPMCUniReceiver<T> {
+    type Item = T;
+
+    type IntoIter = MPSCRefIter<'a, T>;
+
+    fn into_iter(self) -> MPSCRefIter<'a, T> {
+        MPSCRefIter { recv: self }
+    }
+}
+
+pub struct MPMCUniIter<R, F: FnMut(&T) -> R, T> {
+    recv: MPMCUniReceiver<T>,
     op: F,
 }
 
-impl<'a, R, F: FnMut(&T) -> R, T: 'a> Iterator for MPMCUniRefIter<'a, R, F, T> {
+impl<R, F: FnMut(&T) -> R, T> Iterator for MPMCUniIter<R, F, T> {
     type Item = R;
 
     #[inline(always)]
@@ -317,16 +550,34 @@ impl<'a, R, F: FnMut(&T) -> R, T: 'a> Iterator for MPMCUniRefIter<'a, R, F, T> {
     }
 }
 
+pub struct MPMCUniRefIter<'a, R, F: FnMut(&T) -> R, T: 'a> {
+    recv: &'a MPMCUniReceiver<T>,
+    op: F,
+}
+
+impl<'a, R, F: FnMut(&T) -> R, T: 'a> Iterator for MPMCUniRefIter<'a, R, F, T> {
+    type Item = R;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<R> {
+        let opref = &mut self.op;
+        match self.recv.try_recv_view(|v| opref(v)) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
 pub fn mpmc_queue<T>(capacity: Index) -> (MPMCSender<T>, MPMCReceiver<T>) {
     let (send, recv) = MultiQueue::<MPMC<T>, T>::new(capacity);
-    (MPMCSender { sender: send }, MPMCReceiver { reader: recv })
+    (MPMCSender { sender: send }, MPMCReceiver { receiver: recv })
 }
 
 pub fn mpmc_queue_with<T, W: Wait + 'static>(capacity: Index,
                                              w: W)
                                              -> (MPMCSender<T>, MPMCReceiver<T>) {
     let (send, recv) = MultiQueue::<MPMC<T>, T>::new_with(capacity, w);
-    (MPMCSender { sender: send }, MPMCReceiver { reader: recv })
+    (MPMCSender { sender: send }, MPMCReceiver { receiver: recv })
 }
 
 /// Futures variant of mpmc_queue - datastructures implement
@@ -339,8 +590,6 @@ pub fn mpmc_fut_queue<T: Clone>(capacity: Index) -> (MPMCFutSender<T>, MPMCFutRe
 unsafe impl<T: Send> Send for MPMCSender<T> {}
 unsafe impl<T: Send> Send for MPMCReceiver<T> {}
 unsafe impl<T: Send> Send for MPMCUniReceiver<T> {}
-
-
 
 impl<T> MPMCFutSender<T> {
     /// Equivalent to MPMCSender::try_send
@@ -372,6 +621,19 @@ impl<T> MPMCFutReceiver<T> {
     pub fn unsubscribe(self) -> bool {
         self.receiver.unsubscribe()
     }
+
+    /// Analog of MPMCReceiver::into_single
+    /// Since the FutUniReceiver acts more like an iterator,
+    /// this takes the operation to be applied to each value
+    pub fn into_single<R, F: FnMut(&T) -> R>
+        (self,
+         op: F)
+         -> Result<MPMCFutUniReceiver<R, F, T>, (F, MPMCFutReceiver<T>)> {
+        match self.receiver.into_single(op) {
+            Ok(sreceiver) => Ok(MPMCFutUniReceiver { receiver: sreceiver }),
+            Err((o, receiver)) => Err((o, MPMCFutReceiver { receiver: receiver })),
+        }
+    }
 }
 
 impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
@@ -387,9 +649,26 @@ impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
         self.receiver.recv()
     }
 
+    pub fn add_stream_with<RQ, FQ: FnMut(&T) -> RQ>(&self,
+                                                    op: FQ)
+                                                    -> MPMCFutUniReceiver<RQ, FQ, T> {
+        MPMCFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
+    }
+
+    /// Returns a new receiver on the same stream using a different method
+    pub fn transform_operation<RQ, FQ: FnMut(&T) -> RQ>(self, op: FQ)
+                                                    -> MPMCFutUniReceiver<RQ, FQ, T> {
+        MPMCFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
+                                                    }
+
     /// Identical to MPMCReceiver::unsubscribe
     pub fn unsubscribe(self) -> bool {
         self.receiver.unsubscribe()
+    }
+
+    /// Transforms this back into FutReceiver, returning the new receiver
+    pub fn into_multi(self) -> MPMCFutReceiver<T> {
+        MPMCFutReceiver { receiver: self.receiver.into_multi() }
     }
 }
 
@@ -557,8 +836,7 @@ mod test {
             }
             reader.unsubscribe();
         });
-        assert_eq!(senders * num_loop,
-                   counter.load(Ordering::SeqCst));
+        assert_eq!(senders * num_loop, counter.load(Ordering::SeqCst));
     }
 
     #[test]

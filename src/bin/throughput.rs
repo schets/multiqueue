@@ -2,7 +2,7 @@ extern crate crossbeam;
 extern crate multiqueue;
 extern crate time;
 
-use multiqueue::{MulticastReceiver, MulticastSender, multicast_queue_with, wait};
+use multiqueue::{BroadcastReceiver, BroadcastSender, broadcast_queue_with, wait};
 
 use time::precise_time_ns;
 
@@ -12,7 +12,7 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[inline(never)]
-fn recv(bar: &Barrier, mreader: MulticastReceiver<u64>, sum: &AtomicUsize, check: bool) {
+fn recv(bar: &Barrier, mreader: BroadcastReceiver<u64>, sum: &AtomicUsize, check: bool) {
     let reader = mreader.into_single().unwrap();
     bar.wait();
     let start = precise_time_ns();
@@ -34,7 +34,7 @@ fn recv(bar: &Barrier, mreader: MulticastReceiver<u64>, sum: &AtomicUsize, check
     sum.fetch_add((precise_time_ns() - start) as usize, Ordering::SeqCst);
 }
 
-fn send(bar: &Barrier, writer: MulticastSender<u64>, num_push: usize) {
+fn send(bar: &Barrier, writer: BroadcastSender<u64>, num_push: usize) {
     bar.wait();
     for i in 0..num_push as u64 {
         loop {
@@ -48,7 +48,7 @@ fn send(bar: &Barrier, writer: MulticastSender<u64>, num_push: usize) {
 
 fn runit(name: &str, n_senders: usize, n_readers: usize) {
     let num_do = 100000000;
-    let (writer, reader) = multicast_queue_with(20000, wait::BusyWait::new());
+    let (writer, reader) = broadcast_queue_with(20000, wait::BusyWait::new());
     let bar = Barrier::new(1 + n_senders + n_readers);
     let bref = &bar;
     let ns_atomic = AtomicUsize::new(0);

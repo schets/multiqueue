@@ -126,10 +126,6 @@ impl Reader {
     pub fn get_consumers(&self) -> usize {
         unsafe { (*self.meta).num_consumers.load(Ordering::Relaxed) }
     }
-
-    pub fn set_single(&self) {
-        unsafe { (*self.meta).state.set(ReaderState::Single) }
-    }
 }
 
 impl ReaderGroup {

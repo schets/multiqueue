@@ -1,11 +1,11 @@
 extern crate multiqueue;
 extern crate crossbeam;
 
-use self::multiqueue::{multicast_queue};
+use self::multiqueue::{broadcast_queue};
 use self::crossbeam::scope;
 
 fn spsc_example() {
-    let (send, recv) = multicast_queue(4);
+    let (send, recv) = broadcast_queue(4);
     scope(|scope| {
         scope.spawn(move || for val in recv {
             println!("Got {}", val);
@@ -24,7 +24,7 @@ fn spsc_example() {
 }
 
 fn spsc_bcast_example() {
-    let (send, recv) = multicast_queue(4);
+    let (send, recv) = broadcast_queue(4);
     scope(|scope| {
         for i in 0..2 {
             // or n
@@ -55,7 +55,7 @@ fn spsc_bcast_example() {
 }
 
 fn spmc_bcast_example() {
-    let (send, recv) = multicast_queue(4);
+    let (send, recv) = broadcast_queue(4);
     scope(|scope| {
         for i in 0..2 {
             let cur_recv = recv.add_stream();
@@ -86,7 +86,7 @@ fn spmc_bcast_example() {
 }
 
 fn wacky_example() {
-    let (send, recv) = multicast_queue(4);
+    let (send, recv) = broadcast_queue(4);
     scope(|scope| {
         for i in 0..2 {
             let cur_recv = recv.add_stream();
@@ -112,7 +112,7 @@ fn wacky_example() {
         let single_recv_2 = recv.add_stream().into_single().unwrap();
 
         scope.spawn(move || for val in
-            single_recv_2.partial_iter_with(|item_ref| 10 * *item_ref) {
+            single_recv_2.try_iter_with(|item_ref| 10 * *item_ref) {
             println!("{}", val);
         });
 

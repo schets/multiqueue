@@ -1,4 +1,4 @@
-//! This crate provides a fast mpmc multicast queue.
+//! This crate provides a fast mpmc broadcast queue.
 //! It's based on the queue design from the LMAX Disruptor, with a few improvements:
 //!
 //!   * It acts as a futures stream/sink, so you can set up high-performance pipelines
@@ -36,11 +36,11 @@
 //! each stream, each with a label. The lines are meant to show the data flow through the queue.
 //!
 //! ```text
-//! -> #        @-1
-//!     \      /
-//!      -> -> -> @-2
-//!     /      \
-//! -> #        @-3
+//!. -> #        @-1
+//!.     \      /
+//!.      -> -> -> @-2
+//!.     /      \
+//!. -> #        @-3
 //! ```
 //!
 //! This is a pretty standard broadcast queue setup -
@@ -51,23 +51,23 @@
 //! across many actual consumers, like below.
 //!
 //! ```text
-//! -> #        @-1
-//!     \      /
-//!      -> -> -> @-2' (really @+@+@ each compete for a spot)
-//!     /      \
-//! -> #        @-3
+//!. -> #        @-1
+//!.     \      /
+//!.      -> -> -> @-2' (really @+@+@ each compete for a spot)
+//!.     /      \
+//!. -> #        @-3
 //! ```
 //!
 //! If this diagram is redrawn with each of the producers sending in a
 //! sequenced element (time goes left  to right):
 //!
 //! ```text
-//! t=1|t=2|    t=3    | t=4|
-//! 1 -> #              @-1 (1, 2)
-//!       \            /
-//!        -> 2 -> 1 -> -> @-2' (really @ (1) + @ (2) + @ (nothing yet))
-//!       /            \
-//! 2 -> #              @-3 (1, 2)
+//!. t=1|t=2|    t=3    | t=4|
+//!. 1 -> #              @-1 (1, 2)
+//!.       \            /
+//!.        -> 2 -> 1 -> -> @-2' (really @ (1) + @ (2) + @ (nothing yet))
+//!.       /            \
+//!. 2 -> #              @-3 (1, 2)
 //!```
 //!
 //! If one imagines this as a webserver, the streams for @-1 and @-3 might be doing random
@@ -75,7 +75,19 @@
 //! the workload completely on one core, @-2 is doing expensive work handling requests
 //! and is split into multiple workers dealing with the data stream.
 //!
-//!
+//! #MPMC Mode:
+//! One might notice that the broadcast queue modes requires that a type be Clone,
+//! and the single-reader inplace variants require that a type be Sync as well.
+//! This is only required for broadcast queues and not normal mpmc queues,
+//! so there's an mpmc api as well. It doesn't require that a type be Clone or Sync
+//! for any api, and also moves items directly out of the queue instead of cloning them.
+//! 
+//! #Futures Mode:
+//! For both mpmc and broadcast, a futures mode is supported. The datastructures are quite
+//! similar to the normal ones, except they implement the Futures Sink/Stream traits for
+//! senders and receivers. This comes at a bit of a performance cost, which is why the
+//! futures types are separate
+//! 
 //! #Usage:
 //! From the receiving side, this behaves quite similarly to a channel receiver.
 //! The .recv function will block until data is available and then return the data.
@@ -121,7 +133,7 @@
 //!
 //! use std::thread;
 //!
-//! let (send, recv) = multiqueue::multicast_queue(4);
+//! let (send, recv) = multiqueue::broadcast_queue(4);
 //! let mut handles = vec![];
 //! for i in 0..2 { // or n
 //!     let cur_recv = recv.add_stream();
@@ -170,7 +182,7 @@
 //!
 //! use std::thread;
 //!
-//! let (send, recv) = multiqueue::multicast_queue(4);
+//! let (send, recv) = multiqueue::broadcast_queue(4);
 //!
 //! let mut handles = vec![];
 //!
@@ -225,7 +237,7 @@
 //!
 //! use std::thread;
 //!
-//! let (send, recv) = multiqueue::multicast_queue(4);
+//! let (send, recv) = multiqueue::broadcast_queue(4);
 //! let mut handles = vec![];
 //!
 //! // start like before
@@ -257,7 +269,7 @@
 //! let single_recv_2 = recv.add_stream().into_single().unwrap();
 //!
 //! handles.push(thread::spawn(move ||
-//!     for val in single_recv_2.partial_iter_with(|item_ref| 10 * *item_ref) {
+//!     for val in single_recv_2.try_iter_with(|item_ref| 10 * *item_ref) {
 //!         println!("{}", val);
 //!     }
 //! ));
@@ -295,13 +307,13 @@ mod maybe_acquire;
 mod memory;
 mod mpmc;
 mod multiqueue;
-mod multicast;
+mod broadcast;
 mod read_cursor;
 pub mod wait;
 
-pub use multicast::{MulticastSender, MulticastReceiver, MulticastUniReceiver, MulticastFutSender,
-                    MulticastFutReceiver, MulticastFutUniReceiver, multicast_queue,
-                    multicast_queue_with, multicast_fut_queue};
+pub use broadcast::{BroadcastSender, BroadcastReceiver, BroadcastUniReceiver, BroadcastFutSender,
+                    BroadcastFutReceiver, BroadcastFutUniReceiver, broadcast_queue,
+                    broadcast_queue_with, broadcast_fut_queue};
 
 pub use mpmc::{MPMCSender, MPMCReceiver, MPMCUniReceiver, MPMCFutSender, MPMCFutReceiver,
                MPMCFutUniReceiver, mpmc_queue, mpmc_queue_with, mpmc_fut_queue};

@@ -1,6 +1,6 @@
 # MultiQueue: Fast MPMC Multicast Queue 
 
-MultiQueue is a fast bounded mpmc queue that supports broadcast/multicast style operations [![Build Status](https://travis-ci.org/schets/multiqueue.svg?branch=master)](https://travis-ci.org/schets/multiqueue)
+MultiQueue is a fast bounded mpmc queue that supports broadcast/broadcast style operations [![Build Status](https://travis-ci.org/schets/multiqueue.svg?branch=master)](https://travis-ci.org/schets/multiqueue)
 
 [See the documentation here!](https://docs.rs/multiqueue)
 
@@ -9,6 +9,10 @@ MultiQueue is a fast bounded mpmc queue that supports broadcast/multicast style 
 [Queue Model](#model)
 
 [Examples](#examples)
+
+[MPMC Mode](#mpmc)
+
+[Futures Mode](#futures)
 
 [Benchmarks](#bench)
 
@@ -38,8 +42,8 @@ So why would you choose MultiQueue over the built-in channels?
 On the other hand, you would want to use a channel/sync_channel if you:
   * Truly want an unbounded queue, although you should probably handle backlog instead
   * Need senders to block when the queue is full and can't use the futures api
-  * Don't want the memory usage of a large buffer but need to fit many elements in
-  * You frequently add/remove producers/consumers
+  * Don't want the memory usage of a large buffer
+  * You very frequently add/remove producers/consumers
 
 Otherwise, in most cases, MultiQueue should be a good replacement for channels.
 In general, this will function very well as normal bounded queue with performance
@@ -107,7 +111,7 @@ Since those drawings probably made no sense, here are some examples
 
 ## <a name = "examples">Examples</a>
 
-## Single-producer single-stream
+### Single-producer single-stream
 
 This is about as simple as it gets for a queue. Fast, one writer, one reader, simple to use.
 ```rust
@@ -140,7 +144,7 @@ drop(send);
 // some join mechanics here
 ```
 
-## Single-producer double stream.
+### Single-producer double stream.
 
 Let's send the values to two different streams
 ```rust
@@ -187,7 +191,7 @@ drop(send);
 // some join mechanics here
 ```
 
-## Single-producer double stream, 2 consumers per stream
+### Single-producer double stream, 2 consumers per stream
 Let's take the above and make each stream consumed by two consumers
 ```rust
 extern crate multiqueue;
@@ -236,7 +240,7 @@ drop(send);
 // some join mechanics here
 ```
 
-## Something wacky
+### Something wacky
 Has anyone really been far even as decided to use even go want to do look more like?
 
 ```rust
@@ -298,6 +302,22 @@ for _ in 0..3 {
 }
 drop(send);
 ```
+
+## <a name = "mpmc">MPMC Mode</a>
+One might notice that the broadcast queue modes requires that a type be Clone,
+and the single-reader inplace variants require that a type be Sync as well.
+This is only required for broadcast queues and not normal mpmc queues,
+so there's an mpmc api as well. It doesn't require that a type be Clone or Sync
+for any api, and also moves items directly out of the queue instead of cloning them.
+There's basically no api difference aside from that, so I'm not going to have a huge
+section on them.
+
+## <a name = "futures"><Futures Mode</a>
+For both mpmc and broadcast, a futures mode is supported. The datastructures are quite
+similar to the normal ones, except they implement the Futures Sink/Stream traits for
+senders and receivers. This comes at a bit of a performance cost, which is why the
+futures types are separate
+
 
 ## <a name = "bench">Benchmarks</a>
 
