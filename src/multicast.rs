@@ -7,7 +7,7 @@ use std::mem;
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
 
 extern crate futures;
-use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
+use self::futures::{Async, Poll, Sink, Stream, StartSend};
 
 /// This class is the sending half of the multicast Queue. It supports both
 /// single and multi consumer modes with competitive performance in each case.
@@ -19,7 +19,7 @@ use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
 /// ```
 /// use std::thread;
 ///
-/// let (send, recv) = multiqueue::multiqueue(4);
+/// let (send, recv) = multiqueue::multicast_queue(4);
 ///
 /// let mut handles = vec![];
 ///
@@ -79,7 +79,7 @@ pub struct MulticastSender<T: Clone> {
 /// ```
 /// use std::thread;
 ///
-/// let (send, recv) = multiqueue::multiqueue(4);
+/// let (send, recv) = multiqueue::multicast_queue(4);
 ///
 /// let mut handles = vec![];
 ///
@@ -138,9 +138,9 @@ pub struct MulticastReceiver<T: Clone> {
 /// # Example:
 ///
 /// ```
-/// use multiqueue::multiqueue;
+/// use multiqueue::multicast_queue;
 ///
-/// let (w, r) = multiqueue(10);
+/// let (w, r) = multicast_queue(10);
 /// w.try_send(1).unwrap();
 /// let r2 = r.clone();
 /// // Fails since there's two receivers on the stream
@@ -200,10 +200,10 @@ impl<T: Clone> MulticastReceiver<T> {
     /// ```
     ///
     /// ```
-    /// use multiqueue::multiqueue;
+    /// use multiqueue::multicast_queue;
     /// use std::thread;
     ///
-    /// let (send, recv) = multiqueue(10);
+    /// let (send, recv) = multicast_queue(10);
     ///
     /// let handle = thread::spawn(move || {
     ///     for val in recv {
@@ -236,8 +236,8 @@ impl<T: Clone> MulticastReceiver<T> {
     /// # Examples
     ///
     /// ```
-    /// use multiqueue::multiqueue;
-    /// let (w, r) = multiqueue(10);
+    /// use multiqueue::multicast_queue;
+    /// let (w, r) = multicast_queue(10);
     /// w.try_send(1).unwrap();
     /// assert_eq!(r.recv().unwrap(), 1);
     /// w.try_send(1).unwrap();
@@ -249,11 +249,11 @@ impl<T: Clone> MulticastReceiver<T> {
     /// ```
     ///
     /// ```
-    /// use multiqueue::multiqueue;
+    /// use multiqueue::multicast_queue;
     ///
     /// use std::thread;
     ///
-    /// let (send, recv) = multiqueue(4);
+    /// let (send, recv) = multicast_queue(4);
     /// let mut handles = vec![];
     /// for i in 0..2 { // or n
     ///     let cur_recv = recv.add_stream();
@@ -297,8 +297,8 @@ impl<T: Clone> MulticastReceiver<T> {
     /// # Examples
     ///
     /// ```
-    /// use multiqueue::multiqueue;
-    /// let (writer, reader) = multiqueue(1);
+    /// use multiqueue::multicast_queue;
+    /// let (writer, reader) = multicast_queue(1);
     /// let reader_2_1 = reader.add_stream();
     /// let reader_2_2 = reader_2_1.clone();
     /// writer.try_send(1).expect("This will succeed since queue is empty");
@@ -345,7 +345,7 @@ impl<T: Clone + Sync> MulticastUniReceiver<T> {
     /// ```
     /// use multiqueue::multicast_queue;
     ///
-    /// let (w, r) = multicase_queue(10);
+    /// let (w, r) = multicast_queue(10);
     /// let single_r = r.into_single().unwrap();
     /// for i in 0..5 {
     ///     w.try_send(i).unwrap();
@@ -373,9 +373,9 @@ impl<T: Clone + Sync> MulticastUniReceiver<T> {
     ///
     /// # Example
     /// ```
-    /// use multiqueue::multiqueue;
+    /// use multiqueue::multicast_queue;
     ///
-    /// let (w, r) = multiqueue(10);
+    /// let (w, r) = multicast_queue(10);
     /// let single_r = r.into_single().unwrap();
     /// for i in 0..5 {
     ///     w.try_send(i).unwrap();
@@ -560,11 +560,13 @@ impl<T: Clone> MulticastFutSender<T> {
 
 impl<T: Clone> MulticastFutReceiver<T> {
     /// Equivalent to MulticastReceiver::try_recv
+    #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.receiver.try_recv()
     }
 
     /// Equivalent to MulticastReceiver::recv
+    #[inline(always)]
     pub fn recv(&self) -> Result<T, RecvError> {
         self.receiver.recv()
     }
@@ -581,11 +583,13 @@ impl<T: Clone> MulticastFutReceiver<T> {
 
 impl<R, F: FnMut(&T) -> R, T: Clone + Sync> MulticastFutUniReceiver<R, F, T> {
     /// Equivalent to MulticastReceiver::try_recv using the held operation
+    #[inline(always)]
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
         self.receiver.try_recv()
     }
 
     /// Equivalent to MulticastReceiver::recv using the held operation
+    #[inline(always)]
     pub fn recv(&mut self) -> Result<R, RecvError> {
         self.receiver.recv()
     }
@@ -606,10 +610,12 @@ impl<T: Clone> Sink for MulticastFutSender<T> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
+    #[inline(always)]
     fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
         self.sender.start_send(msg)
     }
 
+    #[inline(always)]
     fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
         Ok(Async::Ready(()))
     }
@@ -619,6 +625,7 @@ impl<T: Clone> Stream for MulticastFutReceiver<T> {
     type Item = T;
     type Error = ();
 
+    #[inline(always)]
     fn poll(&mut self) -> Poll<Option<T>, ()> {
         self.receiver.poll()
     }
@@ -628,6 +635,7 @@ impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Stream for MulticastFutUniReceiver<R
     type Item = R;
     type Error = ();
 
+    #[inline(always)]
     fn poll(&mut self) -> Poll<Option<R>, ()> {
         self.receiver.poll()
     }

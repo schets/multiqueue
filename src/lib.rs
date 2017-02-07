@@ -90,7 +90,7 @@
 //!
 //! use std::thread;
 //!
-//! let (send, recv) = multiqueue::multiqueue(10);
+//! let (send, recv) = multiqueue::mpmc_queue(10);
 //!
 //! let handle = thread::spawn(move || {
 //!     for val in recv {
@@ -121,7 +121,7 @@
 //!
 //! use std::thread;
 //!
-//! let (send, recv) = multiqueue::multiqueue(4);
+//! let (send, recv) = multiqueue::multicast_queue(4);
 //! let mut handles = vec![];
 //! for i in 0..2 { // or n
 //!     let cur_recv = recv.add_stream();
@@ -170,7 +170,7 @@
 //!
 //! use std::thread;
 //!
-//! let (send, recv) = multiqueue::multiqueue(4);
+//! let (send, recv) = multiqueue::multicast_queue(4);
 //!
 //! let mut handles = vec![];
 //!
@@ -225,7 +225,7 @@
 //!
 //! use std::thread;
 //!
-//! let (send, recv) = multiqueue::multiqueue(4);
+//! let (send, recv) = multiqueue::multicast_queue(4);
 //! let mut handles = vec![];
 //!
 //! // start like before

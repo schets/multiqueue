@@ -6,7 +6,7 @@ use wait::Wait;
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
 
 extern crate futures;
-use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
+use self::futures::{Async, Poll, Sink, Stream, StartSend};
 
 /// This class is the sending half of the MultiQueue. It supports both
 /// single and multi consumer modes with competitive performance in each case.
@@ -18,7 +18,7 @@ use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
 /// ```
 /// use std::thread;
 ///
-/// let (send, recv) = multiqueue::multiqueue(4);
+/// let (send, recv) = multiqueue::mpmc_queue(4);
 ///
 /// let mut handles = vec![];
 ///
@@ -125,10 +125,10 @@ impl<T> MPMCReceiver<T> {
     /// ```
     ///
     /// ```
-    /// use multiqueue::multiqueue;
+    /// use multiqueue::mpmc_queue;
     /// use std::thread;
     ///
-    /// let (send, recv) = multiqueue(10);
+    /// let (send, recv) = mpmc_queue(10);
     ///
     /// let handle = thread::spawn(move || {
     ///     for val in recv {
@@ -160,8 +160,8 @@ impl<T> MPMCReceiver<T> {
     /// # Examples
     ///
     /// ```
-    /// use multiqueue::multiqueue;
-    /// let (writer, reader) = multiqueue(2);
+    /// use multiqueue::mpmc_queue;
+    /// let (writer, reader) = mpmc_queue(2);
     /// writer.try_send(1).expect("This will succeed since queue is empty");
     /// reader.try_recv().expect("This reader can read");
     /// reader.unsubscribe();
@@ -180,9 +180,9 @@ impl<T> MPMCReceiver<T> {
 /// # Example:
 ///
 /// ```
-/// use multiqueue::multiqueue;
+/// use multiqueue::mpmc_queue;
 ///
-/// let (w, r) = multiqueue(10);
+/// let (w, r) = mpmc_queue(10);
 /// w.try_send(1).unwrap();
 /// let r2 = r.clone();
 /// // Fails since there's two receivers on the stream
@@ -226,8 +226,8 @@ impl<T> MPMCUniReceiver<T> {
     /// # Examples
     ///
     /// ```
-    /// use multiqueue::multiqueue;
-    /// let (writer, reader) = multiqueue(2);
+    /// use multiqueue::mpmc_queue;
+    /// let (writer, reader) = mpmc_queue(2);
     /// writer.try_send(1).expect("This will succeed since queue is empty");
     /// reader.try_recv().expect("This reader can read");
     /// reader.unsubscribe();
@@ -246,6 +246,7 @@ pub struct MPMCIter<T> {
 impl<T> Iterator for MPMCIter<T> {
     type Item = T;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<T> {
         match self.recv.recv() {
             Ok(val) => Some(val),
@@ -271,6 +272,7 @@ pub struct MPMCRefIter<'a, T: 'a> {
 impl<'a, T> Iterator for MPMCRefIter<'a, T> {
     type Item = T;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<T> {
         match self.recv.recv() {
             Ok(val) => Some(val),
@@ -346,12 +348,15 @@ impl<T> MPMCFutSender<T> {
 }
 
 impl<T> MPMCFutReceiver<T> {
+
     /// Equivalent to MPMCReceiver::try_recv
+    #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.receiver.try_recv()
     }
 
     /// Equivalent to MPMCReceiver::recv
+    #[inline(always)]
     pub fn recv(&self) -> Result<T, RecvError> {
         self.receiver.recv()
     }
@@ -363,12 +368,15 @@ impl<T> MPMCFutReceiver<T> {
 }
 
 impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
+
     /// Equivalent to MPMCReceiver::try_recv using the held operation
+    #[inline(always)]
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
         self.receiver.try_recv()
     }
 
     /// Equivalent to MPMCReceiver::recv using the held operation
+    #[inline(always)]
     pub fn recv(&mut self) -> Result<R, RecvError> {
         self.receiver.recv()
     }
@@ -383,10 +391,12 @@ impl<T> Sink for MPMCFutSender<T> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
+    #[inline(always)]
     fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
         self.sender.start_send(msg)
     }
 
+    #[inline(always)]
     fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
         Ok(Async::Ready(()))
     }
@@ -396,6 +406,7 @@ impl<T> Stream for MPMCFutReceiver<T> {
     type Item = T;
     type Error = ();
 
+    #[inline(always)]
     fn poll(&mut self) -> Poll<Option<T>, ()> {
         self.receiver.poll()
     }
@@ -405,6 +416,7 @@ impl<R, F: FnMut(&T) -> R, T> Stream for MPMCFutUniReceiver<R, F, T> {
     type Item = R;
     type Error = ();
 
+    #[inline(always)]
     fn poll(&mut self) -> Poll<Option<R>, ()> {
         self.receiver.poll()
     }

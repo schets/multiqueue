@@ -718,6 +718,7 @@ impl<RW: QueueRW<T>, T> Sink for FutInnerSend<RW, T> {
         }
     }
 
+    #[inline(always)]
     fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
         Ok(Async::Ready(()))
     }
@@ -728,6 +729,7 @@ impl<RW: QueueRW<T>, T> Stream for FutInnerRecv<RW, T> {
     type Error = ();
 
     /// Essentially the same as recv
+    #[inline]
     fn poll(&mut self) -> Poll<Option<T>, ()> {
         self.reader.examine_signals();
         loop {
@@ -752,6 +754,7 @@ impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Stream for FutInnerUniRecv
     type Item = R;
     type Error = ();
 
+    #[inline]
     fn poll(&mut self) -> Poll<Option<R>, ()> {
         self.reader.examine_signals();
         loop {
@@ -886,19 +889,6 @@ impl Wait for FutWait {
 //////// Clone implementations
 
 impl<RW: QueueRW<T>, T> Clone for InnerSend<RW, T> {
-    /// Clones the writer, allowing multiple writers to push into the queue
-    /// from different threads
-    /// # Examples
-    ///
-    /// ```
-    /// use multiqueue::multiqueue;
-    /// let (writer, reader) = multiqueue(16);
-    /// let writer2 = writer.clone();
-    /// writer.try_send(1).unwrap();
-    /// writer2.try_send(2).unwrap();
-    /// assert_eq!(1, reader.try_recv().unwrap());
-    /// assert_eq!(2, reader.try_recv().unwrap());
-    /// ```
     fn clone(&self) -> InnerSend<RW, T> {
         self.state.set(QueueState::Multi);
         let rval = InnerSend {
