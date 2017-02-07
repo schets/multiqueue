@@ -48,6 +48,7 @@ struct ReaderGroup {
 #[repr(C)]
 pub struct ReadCursor {
     readers: AtomicPtr<ReaderGroup>,
+    pub last_pos: Cell<usize>,
 }
 
 impl<'a> ReadAttempt<'a> {
@@ -192,7 +193,11 @@ impl ReadCursor {
         let rg = ReaderGroup::new();
         unsafe {
             let (real_group, reader) = rg.add_stream(0, wrap);
-            (ReadCursor { readers: AtomicPtr::new(real_group) }, reader)
+            (ReadCursor {
+                 readers: AtomicPtr::new(real_group),
+                 last_pos: Cell::new(0),
+             },
+             reader)
         }
     }
 
@@ -277,6 +282,9 @@ impl ReadCursor {
                                       Ordering::SeqCst) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
+                        if (*current_group).readers.len() == 1 {
+                            self.last_pos.set(reader.load_count(Ordering::Relaxed));
+                        }
                         mem.free(current_group, 1);
                         mem.free(reader.pos as *mut ReaderPos, 1);
                         alloc::deallocate(reader.meta as *mut ReaderMeta, 1);

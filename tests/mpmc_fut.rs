@@ -14,13 +14,13 @@ fn is_send<T: Send>() {}
 
 #[test]
 fn bounds() {
-    is_send::<multiqueue::FuturesSender<i32>>();
-    is_send::<multiqueue::FuturesReceiver<i32>>();
+    is_send::<multiqueue::MulticastFutSender<i32>>();
+    is_send::<multiqueue::MulticastFutReceiver<i32>>();
 }
 
 #[test]
 fn send_recv() {
-    let (tx, rx) = multiqueue::futures_multiqueue::<i32>(16);
+    let (tx, rx) = multiqueue::multicast_fut_queue::<i32>(16);
     let mut rx = rx.wait();
 
     tx.send(1).wait().unwrap();
@@ -30,7 +30,7 @@ fn send_recv() {
 
 #[test]
 fn send_shared_recv() {
-    let (tx1, rx) = multiqueue::futures_multiqueue::<i32>(16);
+    let (tx1, rx) = multiqueue::multicast_fut_queue::<i32>(16);
     let tx2 = tx1.clone();
     let mut rx = rx.wait();
 
@@ -43,7 +43,7 @@ fn send_shared_recv() {
 
 #[test]
 fn send_recv_threads() {
-    let (tx, rx) = multiqueue::futures_multiqueue::<i32>(16);
+    let (tx, rx) = multiqueue::multicast_fut_queue::<i32>(16);
     let mut rx = rx.wait();
 
     thread::spawn(move|| {
@@ -55,7 +55,7 @@ fn send_recv_threads() {
 
 #[test]
 fn send_recv_threads_no_capacity() {
-    let (mut tx, rx) = multiqueue::futures_multiqueue::<i32>(0);
+    let (mut tx, rx) = multiqueue::multicast_fut_queue::<i32>(0);
     let mut rx = rx.wait();
 
     let t = thread::spawn(move|| {
@@ -74,7 +74,7 @@ fn send_recv_threads_no_capacity() {
 
 #[test]
 fn recv_close_gets_none() {
-    let (tx, rx) = multiqueue::futures_multiqueue::<i32>(10);
+    let (tx, rx) = multiqueue::multicast_fut_queue::<i32>(10);
 
     // Run on a task context
     lazy(move || {
@@ -89,7 +89,7 @@ fn recv_close_gets_none() {
 
 #[test]
 fn tx_close_gets_none() {
-    let (_, mut rx) = multiqueue::futures_multiqueue::<i32>(10);
+    let (_, mut rx) = multiqueue::multicast_fut_queue::<i32>(10);
 
     // Run on a task context
     lazy(move || {
@@ -104,7 +104,7 @@ fn tx_close_gets_none() {
 fn stress_shared_bounded_hard() {
     const AMT: u32 = 10000;
     const NTHREADS: u32 = 8;
-    let (tx, rx) = multiqueue::futures_multiqueue::<i32>(0);
+    let (tx, rx) = multiqueue::multicast_fut_queue::<i32>(0);
     let mut rx = rx.wait();
 
     let t = thread::spawn(move|| {
@@ -137,7 +137,7 @@ fn stress_receiver_multi_task_bounded_hard() {
     const AMT: usize = 10_000;
     const NTHREADS: u32 = 2;
 
-    let (mut tx, rx) = multiqueue::futures_multiqueue::<usize>(0);
+    let (mut tx, rx) = multiqueue::multicast_fut_queue::<usize>(0);
     let rx = Arc::new(Mutex::new(Some(rx)));
     let n = Arc::new(AtomicUsize::new(0));
 

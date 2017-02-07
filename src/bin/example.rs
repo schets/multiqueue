@@ -1,7 +1,7 @@
 extern crate multiqueue;
 extern crate crossbeam;
 
-use self::multiqueue::{multicast_queue, mpmc_queue};
+use self::multiqueue::{multicast_queue};
 use self::crossbeam::scope;
 
 fn spsc_example() {

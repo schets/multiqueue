@@ -7,10 +7,10 @@
 //!
 //! ```
 //! use multiqueue::wait::*;
-//! use multiqueue::multiqueue_with;
-//! let _ = multiqueue_with::<usize, BusyWait>(10, BusyWait::new());
-//! let _ = multiqueue_with::<usize, YieldingWait>(10, YieldingWait::new());
-//! let _ = multiqueue_with::<usize, BlockingWait>(10, BlockingWait::new());
+//! use multiqueue::multicast_queue_with;
+//! let _ = multicast_queue_with::<usize, BusyWait>(10, BusyWait::new());
+//! let _ = multicast_queue_with::<usize, YieldingWait>(10, YieldingWait::new());
+//! let _ = multicast_queue_with::<usize, BlockingWait>(10, BlockingWait::new());
 //! ```
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::AtomicUsize;
@@ -220,7 +220,7 @@ mod test {
     use std::thread::yield_now;
 
     use super::*;
-    use multiqueue::multiqueue_with;
+    use multicast::multicast_queue_with;
 
     extern crate crossbeam;
     use self::crossbeam::scope;
@@ -234,7 +234,7 @@ mod test {
     }
 
     fn mpsc_broadcast<W: Wait + 'static>(senders: usize, receivers: usize, waiter: W) {
-        let (writer, reader) = multiqueue_with(4, waiter);
+        let (writer, reader) = multicast_queue_with(4, waiter);
         let num_loop = 1000;
         scope(|scope| {
             for q in 0..senders {
