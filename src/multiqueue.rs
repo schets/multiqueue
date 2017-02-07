@@ -1000,7 +1000,7 @@ unsafe impl<RW: QueueRW<T>, T> Send for FutInnerSend<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for FutInnerRecv<RW, T> {}
 unsafe impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Send for FutInnerUniRecv<RW, R, F, T> {}
 
-pub fn futures_multiqueue<RW: QueueRW<T>, T: Clone>
+pub fn futures_multiqueue<RW: QueueRW<T>, T>
     (capacity: Index)
      -> (FutInnerSend<RW, T>, FutInnerRecv<RW, T>) {
     let cons_arc = Arc::new(FutWait::new());
