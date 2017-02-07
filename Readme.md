@@ -1,4 +1,4 @@
-# MultiQueue: Fast MPMC Multicast Queue 
+# MultiQueue: Fast MPMC Broadcast Queue
 
 MultiQueue is a fast bounded mpmc queue that supports broadcast/broadcast style operations [![Build Status](https://travis-ci.org/schets/multiqueue.svg?branch=master)](https://travis-ci.org/schets/multiqueue)
 
@@ -68,7 +68,7 @@ to certain elements.
 A helpful mental model may be to think about this as if each stream was really just an mpmc
 queue that was getting pushed to, and the MultiQueue structure just assembled a bunch together behind the scenes.
 
-An diagram that represents a general use case of the queue where each consumer has unique access to a stream
+An diagram that represents a general use case of a broadcast queue where each consumer has unique access to a stream
 is below - the # stand in for producers and @ stands in for the consumer of each stream, each with a label.
 The lines are meant to show the data flow through the queue.
 
