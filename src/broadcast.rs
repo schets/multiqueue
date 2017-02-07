@@ -8,7 +8,7 @@ use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
 extern crate futures;
 use self::futures::{Async, Poll, Sink, Stream, StartSend};
 
-/// This class is the sending half of the broadcast Queue. It supports both
+/// This class is the sending half of the broadcasting ```MultiQueue```. It supports both
 /// single and multi consumer modes with competitive performance in each case.
 /// It only supports nonblocking writes (the futures sender being an exception)
 /// as well as being the conduit for adding new writers.
@@ -67,7 +67,7 @@ pub struct BroadcastSender<T: Clone> {
     sender: InnerSend<BCast<T>, T>,
 }
 
-/// This class is the receiving half of the MultiQueue.
+/// This class is the receiving half of the broadcast ```MultiQueue```.
 /// Within each stream, it supports both single and multi consumer modes
 /// with competitive performance in each case. It supports blocking and
 /// nonblocking read modes as well as being the conduit for adding
@@ -132,7 +132,7 @@ pub struct BroadcastReceiver<T: Clone> {
 /// is only one consumer for the stream it owns. This means that
 /// one can safely view the data in-place with the recv_view method family
 /// and avoid the cost of copying it. If there's only one receiver on a stream,
-/// it can be converted into a UniInnerRecv
+/// it can be converted into a ```BroadcastUniInnerRecv```
 ///
 /// # Example:
 ///
@@ -155,24 +155,24 @@ pub struct BroadcastUniReceiver<T: Clone + Sync> {
     receiver: InnerRecv<BCast<T>, T>,
 }
 
-/// This is the futures-compatible version of BroadcastSender
+/// This is the futures-compatible version of ```BroadcastSender```
 /// It implements Sink
 #[derive(Clone)]
 pub struct BroadcastFutSender<T: Clone> {
     sender: FutInnerSend<BCast<T>, T>,
 }
 
-/// This is the futures-compatible version of BroadcastReceiver
-/// It implements Stream
+/// This is the futures-compatible version of ```BroadcastReceiver```
+/// It implements ```Stream```
 #[derive(Clone)]
 pub struct BroadcastFutReceiver<T: Clone> {
     receiver: FutInnerRecv<BCast<T>, T>,
 }
 
-/// This is the futures-compatible version of BroadcastUniReceiver
-/// It implements Stream and behaves like the iterator would.
+/// This is the futures-compatible version of ```BroadcastUniReceiver```
+/// It implements ```Stream``` and behaves like the iterator would.
 /// To use a different function must transform itself into a different
-/// UniRecveiver use transform_operation
+/// ```BroadcastFutUniRecveiver``` use ```transform_operation```
 pub struct BroadcastFutUniReceiver<R, F: FnMut(&T) -> R, T: Clone + Sync> {
     receiver: FutInnerUniRecv<BCast<T>, R, F, T>,
 }
@@ -277,7 +277,7 @@ impl<T: Clone> BroadcastReceiver<T> {
     }
 
     /// Adds a new data stream to the queue, starting at the same position
-    /// as the InnerRecv this is being called on.
+    /// as the ```BroadcastReceiver``` this is being called on.
     ///
     /// # Examples
     ///
@@ -332,7 +332,6 @@ impl<T: Clone> BroadcastReceiver<T> {
     /// }
     ///
     /// ```
-
     pub fn add_stream(&self) -> BroadcastReceiver<T> {
         BroadcastReceiver { receiver: self.receiver.add_stream() }
     }
@@ -382,8 +381,8 @@ impl<T: Clone> BroadcastReceiver<T> {
 }
 
 impl<T: Clone + Sync> BroadcastReceiver<T> {
-    /// If there is only one Receiver on the stream, converts the
-    /// Receiver into a SingleReceiver otherwise returns the Receiver.
+    /// If there is only one ```BroadcastReceiver``` on the stream, converts the
+    /// Receiver into a ```BroadcastUniReceiver``` otherwise returns the Receiver.
     ///
     /// # Example:
     ///
@@ -412,13 +411,13 @@ impl<T: Clone + Sync> BroadcastReceiver<T> {
 }
 
 impl<T: Clone + Sync> BroadcastUniReceiver<T> {
-    /// Identical to BroadcastReceiver::try_recv
+    /// Identical to ```BroadcastReceiver::try_recv```
     #[inline(always)]
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.receiver.try_recv()
     }
 
-    /// Identical to BroadcastReceiver::recv
+    /// Identical to ```BroadcastReceiver::recv```
     #[inline(always)]
     pub fn recv(&self) -> Result<T, RecvError> {
         self.receiver.recv()
@@ -426,7 +425,7 @@ impl<T: Clone + Sync> BroadcastUniReceiver<T> {
 
     /// Applies the passed function to the value in the queue without copying it out
     /// If there is no data in the queue or the writers have disconnected,
-    /// returns an Err((F, TryRecvError))
+    /// returns an ```Err((F, TryRecvError))```
     ///
     /// # Example
     /// ```
@@ -483,14 +482,14 @@ impl<T: Clone + Sync> BroadcastUniReceiver<T> {
         self.receiver.recv_view(op)
     }
 
-    /// Almost identical to BroadcastReceiver::unsubscribe, except it doesn't
+    /// Almost identical to ```BroadcastReceiver::unsubscribe```, except it doesn't
     /// return a boolean of whether this was the last receiver on the stream
     /// because a receiver of this type must be the last one on the stream
     pub fn unsubscribe(self) {
         self.receiver.unsubscribe();
     }
 
-    /// Transforms the UniReceiver into a Receiver
+    /// Transforms the ```BroadcastUniReceiver``` into a ```BroadcastReceiver```
     ///
     /// # Example
     ///
@@ -504,9 +503,7 @@ impl<T: Clone + Sync> BroadcastUniReceiver<T> {
     /// normal_r.clone();
     /// ```
     pub fn into_multi(self) -> BroadcastReceiver<T> {
-        BroadcastReceiver {
-            receiver: self.receiver,
-        }
+        BroadcastReceiver { receiver: self.receiver }
     }
 
     /// Returns a non-owning iterator that iterates over the queue
@@ -552,8 +549,8 @@ impl<T: Clone + Sync> BroadcastUniReceiver<T> {
     /// }
     /// ```
     pub fn try_iter_with<'a, R, F: FnMut(&T) -> R>(&'a self,
-                                                       op: F)
-                                                       -> BroadcastUniRefIter<'a, R, F, T> {
+                                                   op: F)
+                                                   -> BroadcastUniRefIter<'a, R, F, T> {
         BroadcastUniRefIter {
             recv: self,
             op: op,
@@ -561,52 +558,129 @@ impl<T: Clone + Sync> BroadcastUniReceiver<T> {
     }
 }
 
-/// Creates a (BroadcastSender, BroadcastReceiver) pair with a capacity that's
-/// the next power of two >= the given capacity
-///
-/// # Example
-/// ```
-/// use multiqueue::broadcast_queue;
-/// let (w, r) = broadcast_queue(10);
-/// w.try_send(10).unwrap();
-/// assert_eq!(10, r.try_recv().unwrap());
-/// ```
-pub fn broadcast_queue<T: Clone>(capacity: Index) -> (BroadcastSender<T>, BroadcastReceiver<T>) {
-    let (send, recv) = MultiQueue::<BCast<T>, T>::new(capacity);
-    (BroadcastSender { sender: send }, BroadcastReceiver { receiver: recv })
+impl<T: Clone> BroadcastFutSender<T> {
+    /// Equivalent to ```BroadcastSender::try_send```
+    #[inline(always)]
+    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
+        self.sender.try_send(val)
+    }
+
+    /// Equivalent to ```BroadcastSender::unsubscribe```
+    pub fn unsubscribe(self) {
+        self.sender.unsubscribe()
+    }
 }
 
-/// Creates a (BroadcastSender, BroadcastReceiver) pair with a capacity that's
-/// the next power of two >= the given capacity and the specified wait strategy
-///
-/// # Example
-/// ```
-/// use multiqueue::broadcast_queue_with;
-/// use multiqueue::wait::BusyWait;
-/// let (w, r) = broadcast_queue_with(10, BusyWait::new());
-/// w.try_send(10).unwrap();
-/// assert_eq!(10, r.try_recv().unwrap());
-/// ```
+impl<T: Clone> BroadcastFutReceiver<T> {
+    /// Equivalent to ```BroadcastReceiver::try_recv```
+    #[inline(always)]
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.receiver.try_recv()
+    }
 
-pub fn broadcast_queue_with<T: Clone, W: Wait + 'static>
-    (capacity: Index,
-     wait: W)
-     -> (BroadcastSender<T>, BroadcastReceiver<T>) {
-    let (send, recv) = MultiQueue::<BCast<T>, T>::new_with(capacity, wait);
-    (BroadcastSender { sender: send }, BroadcastReceiver { receiver: recv })
+    /// Equivalent to ```BroadcastReceiver::recv```
+    #[inline(always)]
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.receiver.recv()
+    }
+
+    pub fn add_stream(&self) -> BroadcastFutReceiver<T> {
+        BroadcastFutReceiver { receiver: self.receiver.add_stream() }
+    }
+
+    /// Identical to ```BroadcastReceiver::unsubscribe```
+    pub fn unsubscribe(self) -> bool {
+        self.receiver.unsubscribe()
+    }
 }
 
-/// Futures variant of broadcast_queue - datastructures implement
-/// Sink + Stream at a minor (~30 ns) performance cost to BlockingWait
-pub fn broadcast_fut_queue<T: Clone>(capacity: Index)
-                                     -> (BroadcastFutSender<T>, BroadcastFutReceiver<T>) {
-    let (isend, irecv) = futures_multiqueue::<BCast<T>, T>(capacity);
-    (BroadcastFutSender { sender: isend }, BroadcastFutReceiver { receiver: irecv })
+impl<T: Clone + Sync> BroadcastFutReceiver<T> {
+    /// Analog of ```BroadcastReceiver::into_single```
+    /// Since the ```BroadcastFutUniReceiver``` acts more like an iterator,
+    /// this takes the operation to be applied to each value
+    pub fn into_single<R, F: FnMut(&T) -> R>
+        (self,
+         op: F)
+         -> Result<BroadcastFutUniReceiver<R, F, T>, (F, BroadcastFutReceiver<T>)> {
+        match self.receiver.into_single(op) {
+            Ok(sreceiver) => Ok(BroadcastFutUniReceiver { receiver: sreceiver }),
+            Err((o, receiver)) => Err((o, BroadcastFutReceiver { receiver: receiver })),
+        }
+    }
 }
 
-unsafe impl<T: Send + Clone> Send for BroadcastSender<T> {}
-unsafe impl<T: Send + Clone> Send for BroadcastReceiver<T> {}
-unsafe impl<T: Send + Clone + Sync> Send for BroadcastUniReceiver<T> {}
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> BroadcastFutUniReceiver<R, F, T> {
+    /// Equivalent to ```BroadcastReceiver::try_recv``` using the held operation
+    #[inline(always)]
+    pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    /// Equivalent to B```roadcastReceiver::recv``` using the held operation
+    #[inline(always)]
+    pub fn recv(&mut self) -> Result<R, RecvError> {
+        self.receiver.recv()
+    }
+
+    /// Adds a stream with the specified method
+    pub fn add_stream_with<RQ, FQ: FnMut(&T) -> RQ>(&self,
+                                                    op: FQ)
+                                                    -> BroadcastFutUniReceiver<RQ, FQ, T> {
+        BroadcastFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
+    }
+
+    /// Returns a new receiver on the same stream using a different method
+    pub fn transform_operation<RQ, FQ: FnMut(&T) -> RQ>(self,
+                                                        op: FQ)
+                                                        -> BroadcastFutUniReceiver<RQ, FQ, T> {
+        BroadcastFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
+    }
+
+    /// Identical to ```BroadcastReceiver::unsubscribe```
+    pub fn unsubscribe(self) -> bool {
+        self.receiver.unsubscribe()
+    }
+
+    /// Transforms this back into ```BroadcastFutReceiver```, returning the new receiver
+    pub fn into_multi(self) -> BroadcastFutReceiver<T> {
+        BroadcastFutReceiver { receiver: self.receiver.into_multi() }
+    }
+}
+
+impl<T: Clone> Sink for BroadcastFutSender<T> {
+    type SinkItem = T;
+    type SinkError = SendError<T>;
+
+    #[inline(always)]
+    fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
+        self.sender.start_send(msg)
+    }
+
+    #[inline(always)]
+    fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
+        Ok(Async::Ready(()))
+    }
+}
+
+impl<T: Clone> Stream for BroadcastFutReceiver<T> {
+    type Item = T;
+    type Error = ();
+
+    #[inline(always)]
+    fn poll(&mut self) -> Poll<Option<T>, ()> {
+        self.receiver.poll()
+    }
+}
+
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Stream for BroadcastFutUniReceiver<R, F, T> {
+    type Item = R;
+    type Error = ();
+
+    #[inline(always)]
+    fn poll(&mut self) -> Poll<Option<R>, ()> {
+        self.receiver.poll()
+    }
+}
 
 pub struct BroadcastIter<T: Clone> {
     recv: BroadcastReceiver<T>,
@@ -683,7 +757,7 @@ impl<'a, T: Clone + 'a> IntoIterator for &'a BroadcastReceiver<T> {
     type IntoIter = BroadcastRefIter<'a, T>;
 
     fn into_iter(self) -> BroadcastRefIter<'a, T> {
-        BroadcastRefIter { recv: self, }
+        BroadcastRefIter { recv: self }
     }
 }
 
@@ -750,128 +824,52 @@ impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> Iterator for BroadcastUniRe
     }
 }
 
-impl<T: Clone> BroadcastFutSender<T> {
-    /// Equivalent to BroadcastSender::try_send
-    #[inline(always)]
-    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
-        self.sender.try_send(val)
-    }
-
-    /// Equivalent to BroadcastSender::unsubscribe
-    pub fn unsubscribe(self) {
-        self.sender.unsubscribe()
-    }
+/// Creates a (BroadcastSender, BroadcastReceiver) pair with a capacity that's
+/// the next power of two >= the given capacity
+///
+/// # Example
+/// ```
+/// use multiqueue::broadcast_queue;
+/// let (w, r) = broadcast_queue(10);
+/// w.try_send(10).unwrap();
+/// assert_eq!(10, r.try_recv().unwrap());
+/// ```
+pub fn broadcast_queue<T: Clone>(capacity: Index) -> (BroadcastSender<T>, BroadcastReceiver<T>) {
+    let (send, recv) = MultiQueue::<BCast<T>, T>::new(capacity);
+    (BroadcastSender { sender: send }, BroadcastReceiver { receiver: recv })
 }
 
-impl<T: Clone> BroadcastFutReceiver<T> {
-    /// Equivalent to BroadcastReceiver::try_recv
-    #[inline(always)]
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.receiver.try_recv()
-    }
+/// Creates a (BroadcastSender, BroadcastReceiver) pair with a capacity that's
+/// the next power of two >= the given capacity and the specified wait strategy
+///
+/// # Example
+/// ```
+/// use multiqueue::broadcast_queue_with;
+/// use multiqueue::wait::BusyWait;
+/// let (w, r) = broadcast_queue_with(10, BusyWait::new());
+/// w.try_send(10).unwrap();
+/// assert_eq!(10, r.try_recv().unwrap());
+/// ```
 
-    /// Equivalent to BroadcastReceiver::recv
-    #[inline(always)]
-    pub fn recv(&self) -> Result<T, RecvError> {
-        self.receiver.recv()
-    }
-
-    pub fn add_stream(&self) -> BroadcastFutReceiver<T> {
-        BroadcastFutReceiver { receiver: self.receiver.add_stream() }
-    }
-
-    /// Identical to BroadcastReceiver::unsubscribe
-    pub fn unsubscribe(self) -> bool {
-        self.receiver.unsubscribe()
-    }
+pub fn broadcast_queue_with<T: Clone, W: Wait + 'static>
+    (capacity: Index,
+     wait: W)
+     -> (BroadcastSender<T>, BroadcastReceiver<T>) {
+    let (send, recv) = MultiQueue::<BCast<T>, T>::new_with(capacity, wait);
+    (BroadcastSender { sender: send }, BroadcastReceiver { receiver: recv })
 }
 
-impl<T: Clone + Sync> BroadcastFutReceiver<T> {
-    /// Analog of BroadcastReceiver::into_single
-    /// Since the FutUniReceiver acts more like an iterator,
-    /// this takes the operation to be applied to each value
-    pub fn into_single<R, F: FnMut(&T) -> R>
-        (self,
-         op: F)
-         -> Result<BroadcastFutUniReceiver<R, F, T>, (F, BroadcastFutReceiver<T>)> {
-        match self.receiver.into_single(op) {
-            Ok(sreceiver) => Ok(BroadcastFutUniReceiver { receiver: sreceiver }),
-            Err((o, receiver)) => Err((o, BroadcastFutReceiver { receiver: receiver })),
-        }
-    }
+/// Futures variant of broadcast_queue - datastructures implement
+/// Sink + Stream at a minor (~30 ns) performance cost to BlockingWait
+pub fn broadcast_fut_queue<T: Clone>(capacity: Index)
+                                     -> (BroadcastFutSender<T>, BroadcastFutReceiver<T>) {
+    let (isend, irecv) = futures_multiqueue::<BCast<T>, T>(capacity);
+    (BroadcastFutSender { sender: isend }, BroadcastFutReceiver { receiver: irecv })
 }
 
-impl<R, F: FnMut(&T) -> R, T: Clone + Sync> BroadcastFutUniReceiver<R, F, T> {
-    /// Equivalent to BroadcastReceiver::try_recv using the held operation
-    #[inline(always)]
-    pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
-        self.receiver.try_recv()
-    }
-
-    /// Equivalent to BroadcastReceiver::recv using the held operation
-    #[inline(always)]
-    pub fn recv(&mut self) -> Result<R, RecvError> {
-        self.receiver.recv()
-    }
-
-    /// Adds a stream with the specified method
-    pub fn add_stream_with<RQ, FQ: FnMut(&T) -> RQ>(&self,
-                                                    op: FQ)
-                                                    -> BroadcastFutUniReceiver<RQ, FQ, T> {
-        BroadcastFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
-    }
-
-    /// Returns a new receiver on the same stream using a different method
-    pub fn transform_operation<RQ, FQ: FnMut(&T) -> RQ>(self, op: FQ)
-                                                    -> BroadcastFutUniReceiver<RQ, FQ, T> {
-        BroadcastFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
-                                                    }
-
-    /// Identical to BroadcastReceiver::unsubscribe
-    pub fn unsubscribe(self) -> bool {
-        self.receiver.unsubscribe()
-    }
-
-    /// Transforms this back into FutReceiver, returning the new receiver
-    pub fn into_multi(self) -> BroadcastFutReceiver<T> {
-        BroadcastFutReceiver { receiver: self.receiver.into_multi() }
-    }
-}
-
-impl<T: Clone> Sink for BroadcastFutSender<T> {
-    type SinkItem = T;
-    type SinkError = SendError<T>;
-
-    #[inline(always)]
-    fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
-        self.sender.start_send(msg)
-    }
-
-    #[inline(always)]
-    fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
-        Ok(Async::Ready(()))
-    }
-}
-
-impl<T: Clone> Stream for BroadcastFutReceiver<T> {
-    type Item = T;
-    type Error = ();
-
-    #[inline(always)]
-    fn poll(&mut self) -> Poll<Option<T>, ()> {
-        self.receiver.poll()
-    }
-}
-
-impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Stream for BroadcastFutUniReceiver<R, F, T> {
-    type Item = R;
-    type Error = ();
-
-    #[inline(always)]
-    fn poll(&mut self) -> Poll<Option<R>, ()> {
-        self.receiver.poll()
-    }
-}
+unsafe impl<T: Send + Clone> Send for BroadcastSender<T> {}
+unsafe impl<T: Send + Clone> Send for BroadcastReceiver<T> {}
+unsafe impl<T: Send + Clone + Sync> Send for BroadcastUniReceiver<T> {}
 
 #[cfg(test)]
 mod test {

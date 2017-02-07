@@ -11,15 +11,15 @@
 //!
 //!   * In most cases, one can view data written directly into the queue without copying it
 //!
-//! In many cases, MultiQueue will be a good replacement for channels and it's broadcast
+//! In many cases, ```MultiQueue``` will be a good replacement for channels and it's broadcast
 //! capabilities can replace more complex concurrency systems with a single queue.
 //!
 //! #Queue Model:
-//! MultiQueue functions similarly to the LMAX Disruptor from a high level view.
+//! ```MultiQueue``` functions similarly to the LMAX Disruptor from a high level view.
 //! There's an incoming FIFO data stream that is broadcast to a set of subscribers
 //! as if there were multiple streams being written to.
 //! There are two main differences:
-//!   * MultiQueue transparently supports switching between single and multiple producers.
+//!   * ```MultiQueue``` transparently supports switching between single and multiple producers.
 //!   * Each broadcast stream can be shared among multiple consumers.
 //!
 //! The last part makes the model a bit confusing, since there's a difference between a
@@ -28,7 +28,7 @@
 //! a single stream each getting unique access to certain elements.
 //!
 //! A helpful mental model may be to think about this as if each stream was really just an mpmc
-//! queue that was getting pushed to, and the MultiQueue structure just assembled a bunch
+//! queue that was getting pushed to, and the ```MultiQueue``` structure just assembled a bunch
 //! together behind the scenes. This isn't the case of course, but it's helpful for thinking.
 //!
 //! An diagram that represents a general use case of the queue where each consumer has unique
@@ -81,18 +81,18 @@
 //! This is only required for broadcast queues and not normal mpmc queues,
 //! so there's an mpmc api as well. It doesn't require that a type be Clone or Sync
 //! for any api, and also moves items directly out of the queue instead of cloning them.
-//! 
+//!
 //! #Futures Mode:
 //! For both mpmc and broadcast, a futures mode is supported. The datastructures are quite
 //! similar to the normal ones, except they implement the Futures Sink/Stream traits for
 //! senders and receivers. This comes at a bit of a performance cost, which is why the
 //! futures types are separate
-//! 
+//!
 //! #Usage:
 //! From the receiving side, this behaves quite similarly to a channel receiver.
 //! The .recv function will block until data is available and then return the data.
 //!
-//! For senders, there is only .try_send (except for the futures sink, which can park),
+//! For senders, there is only ```.try_send``` (except for the futures sink, which can park),
 //! This is due to performance and api reasons - you should handle backlog instead of just blocking.
 //!
 //! # Example: SPSC channel
@@ -298,6 +298,8 @@
 //!    t.join();
 //! }
 //! ```
+
+#![cfg_attr(feature = "cargo-clippy", allow(inline_always))]
 
 mod alloc;
 mod atomicsignal;

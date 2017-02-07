@@ -8,7 +8,7 @@ use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
 extern crate futures;
 use self::futures::{Async, Poll, Sink, Stream, StartSend};
 
-/// This class is the sending half of the MultiQueue. It supports both
+/// This class is the sending half of the mpmc ```MultiQueue```. It supports both
 /// single and multi consumer modes with competitive performance in each case.
 /// It only supports nonblocking writes (the futures sender being an exception)
 /// as well as being the conduit for adding new writers.
@@ -62,7 +62,7 @@ pub struct MPMCSender<T> {
 
 
 /// This is the receiving end of a standard mpmc view of the queue
-/// It functions similarly to the broadcast queue execpt there
+/// It functions similarly to the ```BroadcastReceiver``` execpt there
 /// is only ever one stream. As a result, the type doesn't need to be clone
 #[derive(Clone, Debug)]
 pub struct MPMCReceiver<T> {
@@ -72,38 +72,38 @@ pub struct MPMCReceiver<T> {
 
 /// This is the receiving end of a standard mpmc view of the queue
 /// for when it's statically know that there is only one receiver.
-/// It functions similarly to the broadcast queue UniReceiver execpt there
+/// It functions similarly to the ```BroadcastUniReceiver``` execpt there
 /// is only ever one stream. As a result, the type doesn't need to be clone or sync
 pub struct MPMCUniReceiver<T> {
     receiver: InnerRecv<MPMC<T>, T>,
 }
 
-/// This is the futures-compatible version of MPMCSender
+/// This is the futures-compatible version of ```MPMCSender```
 /// It implements Sink
 #[derive(Clone)]
 pub struct MPMCFutSender<T> {
     sender: FutInnerSend<MPMC<T>, T>,
 }
 
-/// This is the futures-compatible version of MPMCReceiver
+/// This is the futures-compatible version of ```MPMCReceiver```
 /// It implements Stream
 #[derive(Clone)]
 pub struct MPMCFutReceiver<T> {
     receiver: FutInnerRecv<MPMC<T>, T>,
 }
 
-/// This is the futures-compatible version of MPMCUniReceiver
-/// It implements Stream and behaves like the iterator would.
+/// This is the futures-compatible version of ```MPMCUniReceiver```
+/// It implements ```Stream``` and behaves like the iterator would.
 /// To use a different function must transform itself into a different
-/// UniRecveiver use transform_operation
+/// UniRecveiver use ```transform_operation```
 pub struct MPMCFutUniReceiver<R, F: FnMut(&T) -> R, T> {
     receiver: FutInnerUniRecv<MPMC<T>, R, F, T>,
 }
 
 impl<T> MPMCSender<T> {
     /// Tries to send a value into the queue
-    /// If there is no space, returns Err(TrySendError::Full(val))
-    /// If there are no readers, returns Err(TrySendError::Disconnected(val))
+    /// If there is no space, returns ```Err(TrySendError::Full(val))```
+    /// If there are no readers, returns ```Err(TrySendError::Disconnected(val))```
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
         self.sender.try_send(val)
     }
@@ -219,8 +219,8 @@ impl<T> MPMCReceiver<T> {
         self.receiver.unsubscribe()
     }
 
-    /// If there is only one Receiver on the stream, converts the
-    /// Receiver into a SingleReceiver otherwise returns the Receiver.
+    /// If there is only one ```MPMCReceiver``` on the stream, converts the
+    /// Receiver into a ```MPMCUniReceiver``` otherwise returns the ```MPMCReceiver```.
     ///
     /// # Example:
     ///
@@ -270,12 +270,12 @@ impl<T> MPMCReceiver<T> {
 }
 
 impl<T> MPMCUniReceiver<T> {
-    /// Identical to MPMCReceiver::try_recv
+    /// Identical to ```MPMCReceiver::try_recv```
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.receiver.try_recv()
     }
 
-    /// Identical to MPMCReceiver::recv
+    /// Identical to ```MPMCReceiver::recv```
     pub fn recv(&self) -> Result<T, RecvError> {
         self.receiver.recv()
     }
@@ -283,7 +283,7 @@ impl<T> MPMCUniReceiver<T> {
 
     /// Applies the passed function to the value in the queue without copying it out
     /// If there is no data in the queue or the writers have disconnected,
-    /// returns an Err((F, TryRecvError))
+    /// returns an ```Err((F, TryRecvError))```
     ///
     /// # Example
     /// ```
@@ -357,7 +357,7 @@ impl<T> MPMCUniReceiver<T> {
         self.receiver.unsubscribe()
     }
 
-    /// Transforms the UniReceiver into a Receiver
+    /// Transforms the ```MPMCUniReceiver``` into a ```MPMCReceiver```
     ///
     /// # Example
     ///
@@ -371,9 +371,7 @@ impl<T> MPMCUniReceiver<T> {
     /// normal_r.clone();
     /// ```
     pub fn into_multi(self) -> MPMCReceiver<T> {
-        MPMCReceiver {
-            receiver: self.receiver,
-        }
+        MPMCReceiver { receiver: self.receiver }
     }
 
     /// Returns a non-owning iterator that iterates over the queue
@@ -418,15 +416,132 @@ impl<T> MPMCUniReceiver<T> {
     ///     }
     /// }
     /// ```
-    pub fn try_iter_with<'a, R, F: FnMut(&T) -> R>(&'a self,
-                                                       op: F)
-                                                       -> MPMCUniRefIter<'a, R, F, T> {
+    pub fn try_iter_with<'a, R, F: FnMut(&T) -> R>(&'a self, op: F) -> MPMCUniRefIter<'a, R, F, T> {
         MPMCUniRefIter {
             recv: self,
             op: op,
         }
     }
 }
+
+impl<T> MPMCFutSender<T> {
+    /// Equivalent to ```MPMCSender::try_send```
+    #[inline(always)]
+    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
+        self.sender.try_send(val)
+    }
+
+    /// Equivalent to ```MPMCSender::unsubscribe```
+    pub fn unsubscribe(self) {
+        self.sender.unsubscribe()
+    }
+}
+
+impl<T> MPMCFutReceiver<T> {
+    /// Equivalent to ```MPMCReceiver::try_recv```
+    #[inline(always)]
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    /// Equivalent to ```MPMCReceiver::recv```
+    #[inline(always)]
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.receiver.recv()
+    }
+
+    /// Identical to ```MPMCReceiver::unsubscribe```
+    pub fn unsubscribe(self) -> bool {
+        self.receiver.unsubscribe()
+    }
+
+    /// Analog of ```MPMCReceiver::into_single```
+    /// Since the ```FutUniReceiver``` acts more like an iterator,
+    /// this takes the operation to be applied to each value
+    pub fn into_single<R, F: FnMut(&T) -> R>
+        (self,
+         op: F)
+         -> Result<MPMCFutUniReceiver<R, F, T>, (F, MPMCFutReceiver<T>)> {
+        match self.receiver.into_single(op) {
+            Ok(sreceiver) => Ok(MPMCFutUniReceiver { receiver: sreceiver }),
+            Err((o, receiver)) => Err((o, MPMCFutReceiver { receiver: receiver })),
+        }
+    }
+}
+
+impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
+    /// Equivalent to ```MPMCReceiver::try_recv``` using the held operation
+    #[inline(always)]
+    pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    /// Equivalent to ```MPMCReceiver::recv``` using the held operation
+    #[inline(always)]
+    pub fn recv(&mut self) -> Result<R, RecvError> {
+        self.receiver.recv()
+    }
+
+    /// Adds a stream with the specified method
+    pub fn add_stream_with<RQ, FQ: FnMut(&T) -> RQ>(&self,
+                                                    op: FQ)
+                                                    -> MPMCFutUniReceiver<RQ, FQ, T> {
+        MPMCFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
+    }
+
+    /// Returns a new receiver on the same stream using a different method
+    pub fn transform_operation<RQ, FQ: FnMut(&T) -> RQ>(self,
+                                                        op: FQ)
+                                                        -> MPMCFutUniReceiver<RQ, FQ, T> {
+        MPMCFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
+    }
+
+    /// Identical to ```MPMCReceiver::unsubscribe```
+    pub fn unsubscribe(self) -> bool {
+        self.receiver.unsubscribe()
+    }
+
+    /// Transforms this back into ```MPMCFutReceiver```, returning the new receiver
+    pub fn into_multi(self) -> MPMCFutReceiver<T> {
+        MPMCFutReceiver { receiver: self.receiver.into_multi() }
+    }
+}
+
+impl<T> Sink for MPMCFutSender<T> {
+    type SinkItem = T;
+    type SinkError = SendError<T>;
+
+    #[inline(always)]
+    fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
+        self.sender.start_send(msg)
+    }
+
+    #[inline(always)]
+    fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
+        Ok(Async::Ready(()))
+    }
+}
+
+impl<T> Stream for MPMCFutReceiver<T> {
+    type Item = T;
+    type Error = ();
+
+    #[inline(always)]
+    fn poll(&mut self) -> Poll<Option<T>, ()> {
+        self.receiver.poll()
+    }
+}
+
+impl<R, F: FnMut(&T) -> R, T> Stream for MPMCFutUniReceiver<R, F, T> {
+    type Item = R;
+    type Error = ();
+
+    #[inline(always)]
+    fn poll(&mut self) -> Poll<Option<R>, ()> {
+        self.receiver.poll()
+    }
+}
+
 
 pub struct MPMCIter<T> {
     recv: MPMCReceiver<T>,
@@ -568,6 +683,17 @@ impl<'a, R, F: FnMut(&T) -> R, T: 'a> Iterator for MPMCUniRefIter<'a, R, F, T> {
     }
 }
 
+/// Creates a (```MPMCSender```, ```MPMCReceiver```) pair with a capacity that's
+/// the next power of two >= the given capacity
+///
+/// # Example
+/// ```
+/// use multiqueue::mpmc_queue;
+/// let (w, r) = mpmc_queue(10);
+/// w.try_send(10).unwrap();
+/// assert_eq!(10, r.try_recv().unwrap());
+/// ```
+
 pub fn mpmc_queue<T>(capacity: Index) -> (MPMCSender<T>, MPMCReceiver<T>) {
     let (send, recv) = MultiQueue::<MPMC<T>, T>::new(capacity);
     (MPMCSender { sender: send }, MPMCReceiver { receiver: recv })
@@ -580,8 +706,8 @@ pub fn mpmc_queue_with<T, W: Wait + 'static>(capacity: Index,
     (MPMCSender { sender: send }, MPMCReceiver { receiver: recv })
 }
 
-/// Futures variant of mpmc_queue - datastructures implement
-/// Sink + Stream at a minor (~30 ns) performance cost to BlockingWait
+/// Futures variant of ```mpmc_queue``` - datastructures implement
+/// Sink + Stream at a minor (~30 ns) performance cost to ```BlockingWait```
 pub fn mpmc_fut_queue<T: Clone>(capacity: Index) -> (MPMCFutSender<T>, MPMCFutReceiver<T>) {
     let (isend, irecv) = futures_multiqueue::<MPMC<T>, T>(capacity);
     (MPMCFutSender { sender: isend }, MPMCFutReceiver { receiver: irecv })
@@ -590,122 +716,6 @@ pub fn mpmc_fut_queue<T: Clone>(capacity: Index) -> (MPMCFutSender<T>, MPMCFutRe
 unsafe impl<T: Send> Send for MPMCSender<T> {}
 unsafe impl<T: Send> Send for MPMCReceiver<T> {}
 unsafe impl<T: Send> Send for MPMCUniReceiver<T> {}
-
-impl<T> MPMCFutSender<T> {
-    /// Equivalent to MPMCSender::try_send
-    #[inline(always)]
-    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
-        self.sender.try_send(val)
-    }
-
-    /// Equivalent to MPMCSender::unsubscribe
-    pub fn unsubscribe(self) {
-        self.sender.unsubscribe()
-    }
-}
-
-impl<T> MPMCFutReceiver<T> {
-    /// Equivalent to MPMCReceiver::try_recv
-    #[inline(always)]
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.receiver.try_recv()
-    }
-
-    /// Equivalent to MPMCReceiver::recv
-    #[inline(always)]
-    pub fn recv(&self) -> Result<T, RecvError> {
-        self.receiver.recv()
-    }
-
-    /// Identical to MPMCReceiver::unsubscribe
-    pub fn unsubscribe(self) -> bool {
-        self.receiver.unsubscribe()
-    }
-
-    /// Analog of MPMCReceiver::into_single
-    /// Since the FutUniReceiver acts more like an iterator,
-    /// this takes the operation to be applied to each value
-    pub fn into_single<R, F: FnMut(&T) -> R>
-        (self,
-         op: F)
-         -> Result<MPMCFutUniReceiver<R, F, T>, (F, MPMCFutReceiver<T>)> {
-        match self.receiver.into_single(op) {
-            Ok(sreceiver) => Ok(MPMCFutUniReceiver { receiver: sreceiver }),
-            Err((o, receiver)) => Err((o, MPMCFutReceiver { receiver: receiver })),
-        }
-    }
-}
-
-impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
-    /// Equivalent to MPMCReceiver::try_recv using the held operation
-    #[inline(always)]
-    pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
-        self.receiver.try_recv()
-    }
-
-    /// Equivalent to MPMCReceiver::recv using the held operation
-    #[inline(always)]
-    pub fn recv(&mut self) -> Result<R, RecvError> {
-        self.receiver.recv()
-    }
-
-    pub fn add_stream_with<RQ, FQ: FnMut(&T) -> RQ>(&self,
-                                                    op: FQ)
-                                                    -> MPMCFutUniReceiver<RQ, FQ, T> {
-        MPMCFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
-    }
-
-    /// Returns a new receiver on the same stream using a different method
-    pub fn transform_operation<RQ, FQ: FnMut(&T) -> RQ>(self, op: FQ)
-                                                    -> MPMCFutUniReceiver<RQ, FQ, T> {
-        MPMCFutUniReceiver { receiver: self.receiver.add_stream_with(op) }
-                                                    }
-
-    /// Identical to MPMCReceiver::unsubscribe
-    pub fn unsubscribe(self) -> bool {
-        self.receiver.unsubscribe()
-    }
-
-    /// Transforms this back into FutReceiver, returning the new receiver
-    pub fn into_multi(self) -> MPMCFutReceiver<T> {
-        MPMCFutReceiver { receiver: self.receiver.into_multi() }
-    }
-}
-
-impl<T> Sink for MPMCFutSender<T> {
-    type SinkItem = T;
-    type SinkError = SendError<T>;
-
-    #[inline(always)]
-    fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
-        self.sender.start_send(msg)
-    }
-
-    #[inline(always)]
-    fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
-        Ok(Async::Ready(()))
-    }
-}
-
-impl<T> Stream for MPMCFutReceiver<T> {
-    type Item = T;
-    type Error = ();
-
-    #[inline(always)]
-    fn poll(&mut self) -> Poll<Option<T>, ()> {
-        self.receiver.poll()
-    }
-}
-
-impl<R, F: FnMut(&T) -> R, T> Stream for MPMCFutUniReceiver<R, F, T> {
-    type Item = R;
-    type Error = ();
-
-    #[inline(always)]
-    fn poll(&mut self) -> Poll<Option<R>, ()> {
-        self.receiver.poll()
-    }
-}
 
 #[cfg(test)]
 mod test {
