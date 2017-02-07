@@ -299,7 +299,7 @@ impl ReadCursor {
     pub fn has_readers(&self) -> bool {
         unsafe {
             let current_group = &*self.readers.load(CONSUME);
-            current_group.readers.len() == 0
+            current_group.readers.is_empty()
         }
     }
 }

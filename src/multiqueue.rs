@@ -829,7 +829,7 @@ impl FutWait {
         for _ in 0..self.spins_first {
             match f(val) {
                 Err(TrySendError::Full(v)) => val = v,
-                v @ _ => return v,
+                v => return v,
             }
         }
 
@@ -837,7 +837,7 @@ impl FutWait {
             yield_now();
             match f(val) {
                 Err(TrySendError::Full(v)) => val = v,
-                v @ _ => return v,
+                v => return v,
             }
         }
 
@@ -847,7 +847,7 @@ impl FutWait {
                 parked.push(park());
                 return Err(TrySendError::Full(v));
             }
-            v @ _ => return v,
+            v => return v,
         }
     }
 }
