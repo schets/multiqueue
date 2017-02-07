@@ -303,4 +303,5 @@ pub use multicast::{MulticastSender, MulticastReceiver, MulticastUniReceiver, Mu
                     MulticastFutReceiver, MulticastFutUniReceiver, multicast_queue,
                     multicast_queue_with, multicast_fut_queue};
 
-pub use mpmc::{MPMCSender, MPMCReceiver, MPMCUniReceiver, mpmc_queue, mpmc_queue_with};
+pub use mpmc::{MPMCSender, MPMCReceiver, MPMCUniReceiver, MPMCFutSender, MPMCFutReceiver,
+               MPMCFutUniReceiver, mpmc_queue, mpmc_queue_with, mpmc_fut_queue};

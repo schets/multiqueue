@@ -748,8 +748,7 @@ impl<RW: QueueRW<T>, T> Stream for FutInnerRecv<RW, T> {
     }
 }
 
-impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T: Clone + Sync> Stream
-    for FutInnerUniRecv<RW, R, F, T> {
+impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Stream for FutInnerUniRecv<RW, R, F, T> {
     type Item = R;
     type Error = ();
 

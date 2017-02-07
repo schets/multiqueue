@@ -6,7 +6,6 @@ use wait::Wait;
 use std::mem;
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
 
-
 extern crate futures;
 use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
 

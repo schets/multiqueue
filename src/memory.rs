@@ -175,3 +175,5 @@ impl Drop for MemoryManagerInner {
         }
     }
 }
+
+unsafe impl Send for ToFree {}
