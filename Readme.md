@@ -119,7 +119,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::new(10);
+let (send, recv) = multiqueue::mpmc_queue(10);
 
 thread::spawn(move || {
     for val in recv {
@@ -152,7 +152,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::multiqueue(4);
+let (send, recv) = multiqueue::multicast_queue(4);
 
 for i in 0..2 { // or n
     let cur_recv = recv.add_stream();
@@ -191,14 +191,14 @@ drop(send);
 // some join mechanics here
 ```
 
-### Single-producer double stream, 2 consumers per stream
+### Single-producer broadcast, 2 consumers per stream
 Let's take the above and make each stream consumed by two consumers
 ```rust
 extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::multiqueue(4);
+let (send, recv) = multiqueue::multicast_queue(4);
 
 for i in 0..2 { // or n
     let cur_recv = recv.add_stream();
@@ -248,7 +248,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::multiqueue(4);
+let (send, recv) = multiqueue::multicast_queue(4);
 
 // start like before
 for i in 0..2 { // or n
@@ -279,7 +279,7 @@ thread::spawn(move || {
 let single_recv_2 = recv.add_stream().into_single().unwrap();
 
 thread::spawn(move || {
-    for val in single_recv_2.partial_iter_with(|item_ref| 10 * *item_ref) {
+    for val in single_recv_2.try_iter_with(|item_ref| 10 * *item_ref) {
         println!("{}", val);
     }
 });
