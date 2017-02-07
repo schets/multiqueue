@@ -312,7 +312,7 @@ for any api, and also moves items directly out of the queue instead of cloning t
 There's basically no api difference aside from that, so I'm not going to have a huge
 section on them.
 
-## <a name = "futures"><Futures Mode</a>
+## <a name = "futures">Futures Mode</a>
 For both mpmc and broadcast, a futures mode is supported. The datastructures are quite
 similar to the normal ones, except they implement the Futures Sink/Stream traits for
 senders and receivers. This comes at a bit of a performance cost, which is why the
