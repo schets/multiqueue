@@ -708,7 +708,7 @@ pub fn mpmc_queue_with<T, W: Wait + 'static>(capacity: Index,
 
 /// Futures variant of ```mpmc_queue``` - datastructures implement
 /// Sink + Stream at a minor (~30 ns) performance cost to ```BlockingWait```
-pub fn mpmc_fut_queue<T: Clone>(capacity: Index) -> (MPMCFutSender<T>, MPMCFutReceiver<T>) {
+pub fn mpmc_fut_queue<T>(capacity: Index) -> (MPMCFutSender<T>, MPMCFutReceiver<T>) {
     let (isend, irecv) = futures_multiqueue::<MPMC<T>, T>(capacity);
     (MPMCFutSender { sender: isend }, MPMCFutReceiver { receiver: irecv })
 }
