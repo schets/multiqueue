@@ -68,7 +68,7 @@ to certain elements.
 A helpful mental model may be to think about this as if each stream was really just an mpmc
 queue that was getting pushed to, and the MultiQueue structure just assembled a bunch together behind the scenes.
 
-An diagram that represents a general use case of a broadcast queue where each consumer has unique access to a stream
+A diagram that represents a general use case of a broadcast queue where each consumer has unique access to a stream
 is below - the # stand in for producers and @ stands in for the consumer of each stream, each with a label.
 The lines are meant to show the data flow through the queue.
 
@@ -416,9 +416,9 @@ up to date with the individual feeds and markets fall into disarray.
 ## <a name = "footnotes">Footnotes</a>
 
 <a name = "ft1">1</a>. The queue is technically not lockless - a writer which has claimed a write spot
-but then gotten stuck will block readers from progressing. I don't believe there can exist a general purpose
-mpmc ringbuffer based queue which doesn't suffer from that problem, and in practice, it will rarely ever matter.
-Operations that involve adding/remove readers and writers themselves block, but I figure that's fine.
+but then gotten stuck will block readers from progressing. There is a lockless MPMC bounded queue,
+but it requires a statically known max senders and I don't think can be extended to broadcast.
+In practice, it will rarely ever matter.
  
 <a name = "ft2">2</a> These benchmarks had extremely varying benchmarks so I took the upper bound. On some other machines
 they showed only minor performance differences compared to the spsc case so
