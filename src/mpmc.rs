@@ -64,11 +64,16 @@ pub struct MPMCSender<T> {
 /// This is the receiving end of a standard mpmc view of the queue
 /// It functions similarly to the ```BroadcastReceiver``` execpt there
 /// is only ever one stream. As a result, the type doesn't need to be clone
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MPMCReceiver<T> {
     receiver: InnerRecv<MPMC<T>, T>,
 }
 
+impl<T> Clone for MPMCReceiver<T> {
+    fn clone(&self) -> Self {
+        MPMCReceiver { receiver: self.receiver.clone() }
+    }
+}
 
 /// This is the receiving end of a standard mpmc view of the queue
 /// for when it's statically know that there is only one receiver.
@@ -925,5 +930,13 @@ mod test {
         drop(reader2);
         let reader_s = reader.into_single().unwrap();
         assert!(reader_s.recv_view(|x| *x).is_ok());
+    }
+
+    #[test]
+    fn test_recv_clone_item_noclone() {
+        struct NoClone;
+
+        let (_, reader) = mpmc_queue::<NoClone>(10);
+        reader.clone();
     }
 }
