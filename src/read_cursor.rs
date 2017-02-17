@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::mem;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
 
@@ -123,8 +122,14 @@ impl Reader {
         unsafe { (*self.meta).num_consumers.fetch_sub(1, Ordering::SeqCst) }
     }
 
+    #[inline(always)]
     pub fn get_consumers(&self) -> usize {
         unsafe { (*self.meta).num_consumers.load(Ordering::Relaxed) }
+    }
+
+    #[inline(always)]
+    pub fn is_single(&self) -> bool {
+        self.get_consumers() == 1
     }
 }
 
@@ -194,15 +199,6 @@ impl ReadCursor {
                  last_pos: Cell::new(0),
              },
              reader)
-        }
-    }
-
-    #[inline(always)]
-    pub fn prefetch_metadata(&self) {
-        unsafe {
-            let rg = &*self.readers.load(CONSUME);
-            let dummy_ptr: *const usize = mem::transmute(&rg.readers);
-            ptr::read_volatile(dummy_ptr);
         }
     }
 
