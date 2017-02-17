@@ -1003,9 +1003,9 @@ mod test {
                 let cur_writer = writer.clone();
                 scope.spawn(move || {
                     bref.wait();
-                    'outer: for _ in 0..num_loop {
+                    'outer: for i in 0..num_loop {
                         for _ in 0..100000000 {
-                            if cur_writer.try_send(1).is_ok() {
+                            if cur_writer.try_send(i).is_ok() {
                                 continue 'outer;
                             }
                             yield_now();
@@ -1020,10 +1020,15 @@ mod test {
                 for _ in 0..nclone {
                     let this_reader = _this_reader.clone();
                     scope.spawn(move || {
+                        let mut cur = 0;
                         bref.wait();
                         loop {
                             match this_reader.try_recv() {
-                                Ok(_) => {
+                                Ok(val) => {
+                                    if val != 0 && val <= cur {
+                                        panic!("Non-increasing values read {} last, val was {}", val, cur);
+                                    }
+                                    val = cur;
                                     cref.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Err(TryRecvError::Disconnected) => break,

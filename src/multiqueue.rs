@@ -46,7 +46,6 @@ pub struct BCast<T> {
 }
 
 impl<T: Clone> QueueRW<T> for BCast<T> {
-
     // TODO: Skip refcount when type is copyable or clone is safe on junk data
     #[inline(always)]
     fn inc_ref(r: &AtomicUsize) {
@@ -87,7 +86,6 @@ pub struct MPMC<T> {
 }
 
 impl<T> QueueRW<T> for MPMC<T> {
-
     #[inline(always)]
     fn inc_ref(_r: &AtomicUsize) {}
 
@@ -95,7 +93,9 @@ impl<T> QueueRW<T> for MPMC<T> {
     fn dec_ref(_r: &AtomicUsize) {}
 
     #[inline(always)]
-    fn check_ref(_r: &AtomicUsize) -> bool { true }
+    fn check_ref(_r: &AtomicUsize) -> bool {
+        true
+    }
 
     #[inline(always)]
     fn do_drop() -> bool {
@@ -966,7 +966,7 @@ impl<RW: QueueRW<T>, T> Clone for InnerRecv<RW, T> {
         self.reader.dup_consumer();
         InnerRecv {
             queue: self.queue.clone(),
-            reader: self.reader,
+            reader: self.reader.clone(),
             token: self.queue.manager.get_token(),
             alive: true,
         }

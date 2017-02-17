@@ -19,12 +19,12 @@ struct ReaderPos {
 }
 
 struct ReaderMeta {
-    state: Cell<ReaderState>,
     num_consumers: AtomicUsize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Reader {
+    state: Cell<ReaderState>,
     pos: *const ReaderPos,
     meta: *const ReaderMeta,
 }
@@ -34,7 +34,6 @@ pub struct Reader {
 /// readers
 pub struct ReadAttempt<'a> {
     linked: Transaction<'a>,
-    reader: &'a Reader,
     state: ReaderState,
 }
 
@@ -64,24 +63,14 @@ impl<'a> ReadAttempt<'a> {
                 None
             }
             ReaderState::Multi => {
-                if unsafe { (*self.reader.meta).num_consumers.load(Ordering::Relaxed) } == 1 {
-                    fence(Ordering::Acquire);
-                    unsafe {
-                        (*self.reader.meta).state.set(ReaderState::Single);
+                match self.linked.commit(by, ord) {
+                    Some(transaction) => {
+                        Some(ReadAttempt {
+                            linked: transaction,
+                            state: ReaderState::Multi,
+                        })
                     }
-                    self.linked.commit_direct(by, ord);
-                    None
-                } else {
-                    match self.linked.commit(by, ord) {
-                        Some(transaction) => {
-                            Some(ReadAttempt {
-                                linked: transaction,
-                                reader: self.reader,
-                                state: ReaderState::Multi,
-                            })
-                        }
-                        None => None,
-                    }
+                    None => None,
                 }
             }
         }
@@ -94,13 +83,19 @@ impl<'a> ReadAttempt<'a> {
 }
 
 impl Reader {
+    /// Could this be done in a more compiler-friendly way
     #[inline(always)]
     pub fn load_attempt(&self, ord: Ordering) -> ReadAttempt {
+        if self.state.get() == ReaderState::Multi {
+            if unsafe { (*self.meta).num_consumers.load(Ordering::Relaxed) } == 1 {
+                fence(Ordering::Acquire);
+                self.state.set(ReaderState::Single);
+            }
+        }
         unsafe {
             ReadAttempt {
                 linked: (*self.pos).pos_data.load_transaction(ord),
-                reader: self,
-                state: (*self.meta).state.get(),
+                state: self.state.get(),
             }
         }
     }
@@ -112,10 +107,9 @@ impl Reader {
 
     pub fn dup_consumer(&self) {
         unsafe {
-            if (*self.meta).num_consumers.fetch_add(1, Ordering::SeqCst) == 1 {
-                (*self.meta).state.set(ReaderState::Multi);
-            }
+            (*self.meta).num_consumers.fetch_add(1, Ordering::SeqCst);
         }
+        self.state.set(ReaderState::Multi);
     }
 
     pub fn remove_consumer(&self) -> usize {
@@ -145,12 +139,9 @@ impl ReaderGroup {
         let new_pos = alloc::allocate(1);
         ptr::write(new_pos,
                    ReaderPos { pos_data: CountedIndex::from_usize(raw, wrap) });
-        ptr::write(new_meta,
-                   ReaderMeta {
-                       state: Cell::new(ReaderState::Single),
-                       num_consumers: AtomicUsize::new(1),
-                   });
+        ptr::write(new_meta, ReaderMeta { num_consumers: AtomicUsize::new(1) });
         let new_reader = Reader {
+            state: Cell::new(ReaderState::Single),
             pos: new_pos,
             meta: new_meta as *const ReaderMeta,
         };
