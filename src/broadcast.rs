@@ -997,6 +997,8 @@ mod test {
         let bref = &myb;
         let num_loop = 1000000;
         let counter = AtomicUsize::new(0);
+        let _do_panic = AtomicUsize::new(0);
+        let do_panic = &_do_panic;
         let cref = &counter;
         scope(|scope| {
             for _ in 0..senders {
@@ -1005,6 +1007,9 @@ mod test {
                     bref.wait();
                     'outer: for i in 0..num_loop {
                         for _ in 0..100000000 {
+                            if do_panic.load(Ordering::Relaxed) > 0 {
+                                panic!("Somebody left");
+                            }
                             if cur_writer.try_send(i).is_ok() {
                                 continue 'outer;
                             }
@@ -1025,10 +1030,11 @@ mod test {
                         loop {
                             match this_reader.try_recv() {
                                 Ok(val) => {
-                                    if val != 0 && val <= cur {
-                                        panic!("Non-increasing values read {} last, val was {}", val, cur);
+                                    if (senders == 1) && (val != 0) && (val <= cur) {
+                                        do_panic.fetch_add(1, Ordering::Relaxed);
+                                        panic!("Non-increasing values read {} last, val was {}", cur, val);
                                     }
-                                    val = cur;
+                                    cur = val;
                                     cref.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Err(TryRecvError::Disconnected) => break,
