@@ -16,7 +16,6 @@ use std::thread::yield_now;
 use alloc;
 use atomicsignal::LoadedSignal;
 use countedindex::{CountedIndex, get_valid_wrap, is_tagged, rm_tag, Index, INITIAL_QUEUE_FLAG};
-use maybe_acquire::{maybe_acquire_fence, MAYBE_ACQUIRE};
 use memory::{MemoryManager, MemToken};
 use wait::*;
 
@@ -32,6 +31,9 @@ use self::futures::task::{park, Task};
 /// This is basically acting as a static bool
 /// so the queue can act as a normal mpmc in other circumstances
 pub trait QueueRW<T> {
+    fn inc_ref(&AtomicUsize);
+    fn dec_ref(&AtomicUsize);
+    fn check_ref(&AtomicUsize) -> bool;
     fn do_drop() -> bool;
     unsafe fn get_val(&mut T) -> T;
     fn forget_val(T);
@@ -44,6 +46,24 @@ pub struct BCast<T> {
 }
 
 impl<T: Clone> QueueRW<T> for BCast<T> {
+
+    // TODO: Skip refcount when type is copyable or clone is safe on junk data
+    #[inline(always)]
+    fn inc_ref(r: &AtomicUsize) {
+        r.fetch_add(1, Relaxed);
+    }
+
+    // TODO: Skip refcount when type is copyable or clone is safe on junk data
+    #[inline(always)]
+    fn dec_ref(r: &AtomicUsize) {
+        r.fetch_sub(1, Relaxed);
+    }
+
+    #[inline(always)]
+    fn check_ref(r: &AtomicUsize) -> bool {
+        r.load(Relaxed) == 0
+    }
+
     #[inline(always)]
     fn do_drop() -> bool {
         true
@@ -67,6 +87,16 @@ pub struct MPMC<T> {
 }
 
 impl<T> QueueRW<T> for MPMC<T> {
+
+    #[inline(always)]
+    fn inc_ref(_r: &AtomicUsize) {}
+
+    #[inline(always)]
+    fn dec_ref(_r: &AtomicUsize) {}
+
+    #[inline(always)]
+    fn check_ref(_r: &AtomicUsize) -> bool { true }
+
     #[inline(always)]
     fn do_drop() -> bool {
         false
@@ -100,6 +130,12 @@ struct QueueEntry<T> {
     wraps: AtomicUsize,
 }
 
+/// This holds the refcount object
+struct RefCnt {
+    refcnt: AtomicUsize,
+    _buffer: [u8; 64],
+}
+
 /// A bounded queue that supports multiple reader and writers
 /// and supports effecient methods for single consumers and producers
 #[repr(C)]
@@ -119,6 +155,7 @@ pub struct MultiQueue<RW: QueueRW<T>, T> {
     // to be in the shared space
     tail: ReadCursor,
     data: *mut QueueEntry<T>,
+    refs: *mut RefCnt,
     capacity: isize,
     pub waiter: Arc<Wait>,
     needs_notify: bool,
@@ -185,10 +222,14 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
     fn new_internal(_capacity: Index, wait: Arc<Wait>) -> (InnerSend<RW, T>, InnerRecv<RW, T>) {
         let capacity = get_valid_wrap(_capacity);
         let queuedat = alloc::allocate(capacity as usize);
+        let refdat = alloc::allocate(capacity as usize);
         unsafe {
             for i in 0..capacity as isize {
                 let elem: &QueueEntry<T> = &*queuedat.offset(i);
                 elem.wraps.store(INITIAL_QUEUE_FLAG, Relaxed);
+
+                let refd: &RefCnt = &*refdat.offset(i);
+                refd.refcnt.store(0, Relaxed);
             }
         }
 
@@ -204,6 +245,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
 
             tail: cursor,
             data: queuedat,
+            refs: refdat,
             capacity: capacity as isize,
             waiter: wait,
             needs_notify: needs_notify,
@@ -239,16 +281,20 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         unsafe {
             loop {
                 let (chead, wrap_valid_tag) = transaction.get();
-                let write_cell = &mut *self.data.offset(chead);
                 let tail_cache = self.tail_cache.load(Relaxed);
                 if transaction.matches_previous(tail_cache) {
                     let new_tail = self.reload_tail_multi(tail_cache, wrap_valid_tag);
                     if transaction.matches_previous(new_tail) {
                         return Err(TrySendError::Full(val));
                     }
-                } else {
-                    maybe_acquire_fence();
                 }
+                let write_cell = &mut *self.data.offset(chead);
+                let ref_cell = &*self.refs.offset(chead);
+                if !RW::check_ref(&ref_cell.refcnt) {
+                    return Err(TrySendError::Full(val));
+                }
+                fence(Acquire);
+
                 match transaction.commit(1, Relaxed) {
                     Some(new_transaction) => transaction = new_transaction,
                     None => {
@@ -266,13 +312,6 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                         };
                         ptr::write(&mut write_cell.val, val);
                         write_cell.wraps.store(wrap_valid_tag, Release);
-
-                        // This tries to ensure the tail fetch metadata is always in the cache
-                        // The effect of this is that whenever one has to find the minimum tail,
-                        // the data about the loop is in-cache so that whole loop executes deep in
-                        // an out-of-order engine while the branch predictor
-                        // predicts there is more space and continues on pushing
-                        self.tail.prefetch_metadata();
                         return Ok(());
                     }
                 }
@@ -284,7 +323,6 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         let transaction = self.head.load_transaction(Relaxed);
         let (chead, wrap_valid_tag) = transaction.get();
         unsafe {
-            let write_cell = &mut *self.data.offset(chead);
             let tail_cache = self.tail_cache.load(Relaxed);
             if transaction.matches_previous(tail_cache) {
                 let new_tail = self.reload_tail_single(wrap_valid_tag);
@@ -292,6 +330,12 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                     return Err(TrySendError::Full(val));
                 }
             }
+            let write_cell = &mut *self.data.offset(chead);
+            let ref_cell = &*self.refs.offset(chead);
+            if !RW::check_ref(&ref_cell.refcnt) {
+                return Err(TrySendError::Full(val));
+            }
+            fence(Acquire);
             transaction.commit_direct(1, Relaxed);
             let current_tag = write_cell.wraps.load(Relaxed);
             let _possible_drop = if RW::do_drop() && !is_tagged(current_tag) {
@@ -301,7 +345,6 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
             };
             ptr::write(&mut write_cell.val, val);
             write_cell.wraps.store(wrap_valid_tag, Release);
-            self.tail.prefetch_metadata(); // See push_multi on this
             Ok(())
         }
     }
@@ -319,7 +362,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                 // between the first and second if statements. Hence, a second check is required
                 // after the writer load so ensure that the the wrap_valid_tag is still wrong so
                 // we had actually seen a race. Doing it this way removes fences on the fast path
-                if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
+                if rm_tag(read_cell.wraps.load(Relaxed)) != wrap_valid_tag {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
                         if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
@@ -328,8 +371,18 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                     }
                     return Err((&read_cell.wraps, TryRecvError::Empty));
                 }
+                let ref_cell = &*self.refs.offset(ctail);
+                let is_single = reader.is_single();
+                if !is_single {
+                    RW::inc_ref(&ref_cell.refcnt);
+                }
+                fence(Acquire);
                 let rval = RW::get_val(&mut read_cell.val);
-                match ctail_attempt.commit_attempt(1, Release) {
+                fence(Release);
+                if !is_single {
+                    RW::dec_ref(&ref_cell.refcnt);
+                }
+                match ctail_attempt.commit_attempt(1, Relaxed) {
                     Some(new_attempt) => {
                         ctail_attempt = new_attempt;
                         RW::forget_val(rval);
@@ -352,7 +405,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
             if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
                 if self.writers.load(Relaxed) == 0 {
                     fence(Acquire);
-                    if rm_tag(read_cell.wraps.load(MAYBE_ACQUIRE)) != wrap_valid_tag {
+                    if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
                         return Err((op, ptr::null(), TryRecvError::Disconnected));
                     }
                 }
