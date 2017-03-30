@@ -377,6 +377,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                     RW::inc_ref(&ref_cell.refcnt);
                     if reader.load_count(Relaxed) != wrap_valid_tag {
                         RW::dec_ref(&ref_cell.refcnt);
+                        ctail_attempt = ctail_attempt.reload();
                         continue;
                     }
                 }

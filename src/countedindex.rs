@@ -168,6 +168,16 @@ impl<'a> Transaction<'a> {
         let store_val = rm_tag(self.loaded_vals.wrapping_add(by as usize));
         self.ptr.store(store_val, ord);
     }
+
+    #[inline(always)]
+    pub fn reload(self) -> Transaction<'a> {
+        Transaction {
+            ptr: self.ptr,
+            loaded_vals: self.ptr.load(self.lord),
+            lord: self.lord,
+            mask: self.mask,
+        }
+    }
 }
 
 unsafe impl Send for CountedIndex {}

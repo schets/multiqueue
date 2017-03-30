@@ -77,6 +77,14 @@ impl<'a> ReadAttempt<'a> {
     }
 
     #[inline(always)]
+    pub fn reload(self) -> ReadAttempt<'a> {
+        ReadAttempt {
+            linked: self.linked.reload(),
+            state: self.state,
+        }
+    }
+
+    #[inline(always)]
     pub fn commit_direct(self, by: Index, ord: Ordering) {
         self.linked.commit_direct(by, ord);
     }
