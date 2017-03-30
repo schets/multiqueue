@@ -382,7 +382,6 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                     }
                 }
                 else {
-                    // inc_ref is a strong fence, no extra fence needed
                     fence(Acquire);
                 }
                 let rval = RW::get_val(&mut read_cell.val);
