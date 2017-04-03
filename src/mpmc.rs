@@ -85,14 +85,12 @@ pub struct MPMCUniReceiver<T> {
 
 /// This is the futures-compatible version of ```MPMCSender```
 /// It implements Sink
-#[derive(Clone)]
 pub struct MPMCFutSender<T> {
     sender: FutInnerSend<MPMC<T>, T>,
 }
 
 /// This is the futures-compatible version of ```MPMCReceiver```
 /// It implements Stream
-#[derive(Clone)]
 pub struct MPMCFutReceiver<T> {
     receiver: FutInnerRecv<MPMC<T>, T>,
 }
@@ -512,6 +510,14 @@ impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
     }
 }
 
+impl<T> Clone for MPMCFutSender<T> {
+    fn clone(&self) -> Self {
+        MPMCFutSender {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
 impl<T> Sink for MPMCFutSender<T> {
     type SinkItem = T;
     type SinkError = SendError<T>;
@@ -524,6 +530,14 @@ impl<T> Sink for MPMCFutSender<T> {
     #[inline(always)]
     fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
         Ok(Async::Ready(()))
+    }
+}
+
+impl<T> Clone for MPMCFutReceiver<T> {
+    fn clone(&self) -> Self {
+        MPMCFutReceiver {
+            receiver: self.receiver.clone(),
+        }
     }
 }
 
