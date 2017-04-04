@@ -180,7 +180,6 @@ pub struct InnerRecv<RW: QueueRW<T>, T> {
 }
 
 /// This is a sender that can transparently act as a futures stream
-#[derive(Clone)]
 pub struct FutInnerSend<RW: QueueRW<T>, T> {
     writer: InnerSend<RW, T>,
     wait: Arc<FutWait>,
@@ -188,7 +187,6 @@ pub struct FutInnerSend<RW: QueueRW<T>, T> {
 }
 
 /// This is a receiver that can transparently act as a futures stream
-#[derive(Clone)]
 pub struct FutInnerRecv<RW: QueueRW<T>, T> {
     reader: InnerRecv<RW, T>,
     wait: Arc<FutWait>,
@@ -969,6 +967,26 @@ impl<RW: QueueRW<T>, T> Clone for InnerRecv<RW, T> {
             reader: self.reader.clone(),
             token: self.queue.manager.get_token(),
             alive: true,
+        }
+    }
+}
+
+impl<RW: QueueRW<T>, T> Clone for FutInnerSend<RW, T> {
+    fn clone(&self) -> FutInnerSend<RW, T> {
+        FutInnerSend {
+            writer: self.writer.clone(),
+            wait: self.wait.clone(),
+            prod_wait: self.prod_wait.clone(),
+        }
+    }
+}
+
+impl<RW: QueueRW<T>, T> Clone for FutInnerRecv<RW, T> {
+    fn clone(&self) -> FutInnerRecv<RW, T> {
+        FutInnerRecv {
+            reader: self.reader.clone(),
+            wait: self.wait.clone(),
+            prod_wait: self.prod_wait.clone(),
         }
     }
 }
