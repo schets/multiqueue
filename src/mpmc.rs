@@ -512,9 +512,7 @@ impl<R, F: FnMut(&T) -> R, T> MPMCFutUniReceiver<R, F, T> {
 
 impl<T> Clone for MPMCFutSender<T> {
     fn clone(&self) -> Self {
-        MPMCFutSender {
-            sender: self.sender.clone(),
-        }
+        MPMCFutSender { sender: self.sender.clone() }
     }
 }
 
@@ -535,9 +533,7 @@ impl<T> Sink for MPMCFutSender<T> {
 
 impl<T> Clone for MPMCFutReceiver<T> {
     fn clone(&self) -> Self {
-        MPMCFutReceiver {
-            receiver: self.receiver.clone(),
-        }
+        MPMCFutReceiver { receiver: self.receiver.clone() }
     }
 }
 

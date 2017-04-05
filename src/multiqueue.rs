@@ -29,6 +29,8 @@ extern crate smallvec;
 use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
 use self::futures::task::{park, Task};
 
+use self::atomic_utilities::artificial_dep::{dependently_mut, DepOrd};
+
 /// This is basically acting as a static bool
 /// so the queue can act as a normal mpmc in other circumstances
 pub trait QueueRW<T> {
@@ -363,7 +365,8 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                 // between the first and second if statements. Hence, a second check is required
                 // after the writer load so ensure that the the wrap_valid_tag is still wrong so
                 // we had actually seen a race. Doing it this way removes fences on the fast path
-                if rm_tag(read_cell.wraps.load(Relaxed)) != wrap_valid_tag {
+                let seen_tag = read_cell.wraps.load(DepOrd);
+                if rm_tag(seen_tag) != wrap_valid_tag {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
                         if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
@@ -381,10 +384,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                         continue;
                     }
                 }
-                else {
-                    fence(Acquire);
-                }
-                let rval = RW::get_val(&mut read_cell.val);
+                let rval = dependently_mut(seen_tag, &mut read_cell.val, |rc| RW::get_val(rc));
                 fence(Release);
                 if !is_single {
                     RW::dec_ref(&ref_cell.refcnt);
@@ -409,7 +409,8 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         unsafe {
             let (ctail, wrap_valid_tag) = ctail_attempt.get();
             let read_cell = &mut *self.data.offset(ctail);
-            if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
+            let seen_tag = rm_tag(read_cell.wraps.load(DepOrd));
+            if seen_tag != wrap_valid_tag {
                 if self.writers.load(Relaxed) == 0 {
                     fence(Acquire);
                     if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
@@ -418,10 +419,12 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                 }
                 return Err((op, &read_cell.wraps, TryRecvError::Empty));
             }
-            let rval = op(&read_cell.val);
-            RW::drop_in_place(&mut read_cell.val);
-            ctail_attempt.commit_direct(1, Release);
-            Ok(rval)
+            dependently_mut(seen_tag, &mut read_cell.val, |rv_ref| {
+                let rval = op(rv_ref);
+                RW::drop_in_place(rv_ref);
+                ctail_attempt.commit_direct(1, Release);
+                Ok(rval)
+            })
         }
     }
 
@@ -454,7 +457,10 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
 impl<RW: QueueRW<T>, T> InnerSend<RW, T> {
     #[inline(always)]
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
-        let signal = self.queue.manager.signal.load(Relaxed);
+        let signal = self.queue
+            .manager
+            .signal
+            .load(Relaxed);
         if signal.has_action() {
             let disconnected = self.handle_signals(signal);
             if disconnected {
@@ -565,7 +571,10 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
 
     #[inline(always)]
     fn examine_signals(&self) {
-        let signal = self.queue.manager.signal.load(Relaxed);
+        let signal = self.queue
+            .manager
+            .signal
+            .load(Relaxed);
         if signal.has_action() {
             self.handle_signals(signal);
         }
@@ -589,7 +598,10 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
             self.alive = false;
             if self.reader.remove_consumer() == 1 {
                 if self.queue.tail.remove_reader(&self.reader, &self.queue.manager) {
-                    self.queue.manager.signal.set_reader(SeqCst);
+                    self.queue
+                        .manager
+                        .signal
+                        .set_reader(SeqCst);
                 }
                 self.queue.manager.remove_token(self.token);
             }
@@ -649,11 +661,11 @@ impl<RW: QueueRW<T>, T> FutInnerRecv<RW, T> {
         }
         if new_mreader.is_single() {
             Ok(FutInnerUniRecv {
-                reader: new_mreader,
-                wait: new_wait,
-                prod_wait: new_pwait,
-                op: op,
-            })
+                   reader: new_mreader,
+                   wait: new_wait,
+                   prod_wait: new_pwait,
+                   op: op,
+               })
         } else {
             Err((op,
                  FutInnerRecv {
@@ -731,9 +743,7 @@ pub struct SendError<T>(T);
 
 impl<T> fmt::Debug for SendError<T> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_tuple("SendError")
-            .field(&"...")
-            .finish()
+        fmt.debug_tuple("SendError").field(&"...").finish()
     }
 }
 
@@ -769,7 +779,10 @@ impl<RW: QueueRW<T>, T> Sink for FutInnerSend<RW, T> {
             Ok(_) => {
                 // see InnerSend::try_recv for why this isn't in the queue
                 if self.writer.queue.needs_notify {
-                    self.writer.queue.waiter.notify();
+                    self.writer
+                        .queue
+                        .waiter
+                        .notify();
                 }
                 Ok(AsyncSink::Ready)
             }
@@ -819,9 +832,7 @@ impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Stream for FutInnerUniRecv
         self.reader.examine_signals();
         loop {
             let opref = &mut self.op;
-            match self.reader
-                .queue
-                .try_recv_view(opref, &self.reader.reader) {
+            match self.reader.queue.try_recv_view(opref, &self.reader.reader) {
                 Ok(msg) => {
                     self.prod_wait.notify_one();
                     return Ok(Async::Ready(Some(msg)));

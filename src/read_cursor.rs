@@ -66,9 +66,9 @@ impl<'a> ReadAttempt<'a> {
                 match self.linked.commit(by, ord) {
                     Some(transaction) => {
                         Some(ReadAttempt {
-                            linked: transaction,
-                            state: ReaderState::Multi,
-                        })
+                                 linked: transaction,
+                                 state: ReaderState::Multi,
+                             })
                     }
                     None => None,
                 }
@@ -238,11 +238,10 @@ impl ReadCursor {
                 let wrap = (*reader.pos).pos_data.wrap_at();
                 let (new_group, new_reader) = current_group.add_stream(raw, wrap);
                 fence(Ordering::SeqCst);
-                match self.readers
-                    .compare_exchange(current_ptr,
-                                      new_group,
-                                      Ordering::Relaxed,
-                                      Ordering::Relaxed) {
+                match self.readers.compare_exchange(current_ptr,
+                                                    new_group,
+                                                    Ordering::Relaxed,
+                                                    Ordering::Relaxed) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         manager.free(current_ptr, 1);
@@ -266,11 +265,10 @@ impl ReadCursor {
         loop {
             unsafe {
                 let new_group = (*current_group).remove_reader(reader.pos);
-                match self.readers
-                    .compare_exchange(current_group,
-                                      new_group,
-                                      Ordering::SeqCst,
-                                      Ordering::SeqCst) {
+                match self.readers.compare_exchange(current_group,
+                                                    new_group,
+                                                    Ordering::SeqCst,
+                                                    Ordering::SeqCst) {
                     Ok(_) => {
                         fence(Ordering::SeqCst);
                         if (*current_group).readers.len() == 1 {

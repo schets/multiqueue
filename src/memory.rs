@@ -141,14 +141,12 @@ impl MemoryManager {
         let mut elemvec = self.wait_to_free.lock().unwrap();
         elemvec.push(ToFree::new(pt, num));
         {
-            let _ = self.mem_manager
-                .try_lock()
-                .map(|mut inner| {
-                    let epoch = self.epoch.load(Ordering::SeqCst);
-                    if inner.try_freeing(epoch) {
-                        self.signal.clear_epoch(Ordering::Release);
-                    }
-                });
+            let _ = self.mem_manager.try_lock().map(|mut inner| {
+                let epoch = self.epoch.load(Ordering::SeqCst);
+                if inner.try_freeing(epoch) {
+                    self.signal.clear_epoch(Ordering::Release);
+                }
+            });
         }
         if elemvec.len() > 20 {
             self.start_free(&mut elemvec);

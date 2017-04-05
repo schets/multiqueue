@@ -154,11 +154,11 @@ impl<'a> Transaction<'a> {
             Ok(_) => None,
             Err(cval) => {
                 Some(Transaction {
-                    ptr: self.ptr,
-                    loaded_vals: cval,
-                    lord: self.lord,
-                    mask: self.mask,
-                })
+                         ptr: self.ptr,
+                         loaded_vals: cval,
+                         lord: self.lord,
+                         mask: self.mask,
+                     })
             }
         }
     }
@@ -211,18 +211,18 @@ mod tests {
     fn test_incr_param_threaded(wrap_size: Index, goaround: usize, nthread: usize) {
         let mycounted = CountedIndex::new(wrap_size);
         scope(|scope| for _ in 0..nthread {
-            scope.spawn(|| for _ in 0..goaround {
-                for _ in 0..wrap_size {
-                    let mut trans = mycounted.load_transaction(Relaxed);
-                    loop {
-                        match trans.commit(1, Release) {
-                            Some(new_t) => trans = new_t,
-                            None => break,
-                        }
-                    }
-                }
-            });
-        });
+                  scope.spawn(|| for _ in 0..goaround {
+                                  for _ in 0..wrap_size {
+                                      let mut trans = mycounted.load_transaction(Relaxed);
+                                      loop {
+                                          match trans.commit(1, Release) {
+                                              Some(new_t) => trans = new_t,
+                                              None => break,
+                                          }
+                                      }
+                                  }
+                              });
+              });
         assert_eq!(0, mycounted.load(Relaxed));
         assert_eq!(wrap_size as usize * goaround * nthread,
                    mycounted.load_count(Relaxed));
