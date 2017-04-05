@@ -693,7 +693,7 @@ impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutInnerUniRecv<RW, R, F, T> {
     pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
         let opref = &mut self.op;
         let rval = self.reader.try_recv_view(|tr| opref(tr));
-        self.prod_wait.notify_one();
+        self.prod_wait.notify_all();
         rval.map_err(|x| x.1)
     }
 
@@ -702,7 +702,7 @@ impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutInnerUniRecv<RW, R, F, T> {
     pub fn recv(&mut self) -> Result<R, RecvError> {
         let opref = &mut self.op;
         let rval = self.reader.recv_view(|tr| opref(tr));
-        self.prod_wait.notify_one();
+        self.prod_wait.notify_all();
         rval.map_err(|x| x.1)
     }
 
@@ -808,7 +808,7 @@ impl<RW: QueueRW<T>, T> Stream for FutInnerRecv<RW, T> {
         loop {
             match self.reader.queue.try_recv(&self.reader.reader) {
                 Ok(msg) => {
-                    self.prod_wait.notify_one();
+                    self.prod_wait.notify_all();
                     return Ok(Async::Ready(Some(msg)));
                 }
                 Err((_, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
@@ -834,7 +834,7 @@ impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Stream for FutInnerUniRecv
             let opref = &mut self.op;
             match self.reader.queue.try_recv_view(opref, &self.reader.reader) {
                 Ok(msg) => {
-                    self.prod_wait.notify_one();
+                    self.prod_wait.notify_all();
                     return Ok(Async::Ready(Some(msg)));
                 }
                 Err((_, _, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
@@ -923,14 +923,10 @@ impl FutWait {
         }
     }
 
-    fn notify_one(&self) {
+    fn notify_all(&self) {
         let mut parked = self.parked.lock();
-        match parked.pop_front() {
-            Some(val) => {
-                drop(parked);
-                val.unpark();
-            }
-            None => (),
+        for val in parked.drain(..) {
+            val.unpark();
         }
     }
 }
