@@ -867,9 +867,9 @@ pub fn broadcast_fut_queue<T: Clone>(capacity: Index)
     (BroadcastFutSender { sender: isend }, BroadcastFutReceiver { receiver: irecv })
 }
 
-unsafe impl<T: Send + Clone> Send for BroadcastSender<T> {}
-unsafe impl<T: Send + Clone> Send for BroadcastReceiver<T> {}
-unsafe impl<T: Send + Clone + Sync> Send for BroadcastUniReceiver<T> {}
+unsafe impl<T: Send + Sync + Clone> Send for BroadcastSender<T> {}
+unsafe impl<T: Send + Sync + Clone> Send for BroadcastReceiver<T> {}
+unsafe impl<T: Send + Sync + Clone> Send for BroadcastUniReceiver<T> {}
 
 #[cfg(test)]
 mod test {
