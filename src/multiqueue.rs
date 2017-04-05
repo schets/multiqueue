@@ -21,6 +21,7 @@ use wait::*;
 
 use read_cursor::{ReadCursor, Reader};
 
+extern crate atomic_utilities;
 extern crate futures;
 extern crate parking_lot;
 extern crate smallvec;
@@ -49,7 +50,8 @@ impl<T: Clone> QueueRW<T> for BCast<T> {
     // TODO: Skip refcount when type is copyable or clone is safe on junk data
     #[inline(always)]
     fn inc_ref(r: &AtomicUsize) {
-        r.fetch_add(1, Relaxed);
+        r.fetch_add(1, atomic_utilities::fence_rmw::RMWOrder);
+        atomic_utilities::fence_rmw::fence_rmw();
     }
 
     // TODO: Skip refcount when type is copyable or clone is safe on junk data
@@ -349,6 +351,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
 
     pub fn try_recv(&self, reader: &Reader) -> Result<T, (*const AtomicUsize, TryRecvError)> {
         let mut ctail_attempt = reader.load_attempt(Relaxed);
+        let is_single = reader.is_single();
         unsafe {
             loop {
                 let (ctail, wrap_valid_tag) = ctail_attempt.get();
@@ -370,11 +373,17 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                     return Err((&read_cell.wraps, TryRecvError::Empty));
                 }
                 let ref_cell = &*self.refs.offset(ctail);
-                let is_single = reader.is_single();
                 if !is_single {
                     RW::inc_ref(&ref_cell.refcnt);
+                    if reader.load_count(Relaxed) != wrap_valid_tag {
+                        RW::dec_ref(&ref_cell.refcnt);
+                        ctail_attempt = ctail_attempt.reload();
+                        continue;
+                    }
                 }
-                fence(Acquire);
+                else {
+                    fence(Acquire);
+                }
                 let rval = RW::get_val(&mut read_cell.val);
                 fence(Release);
                 if !is_single {
