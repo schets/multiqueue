@@ -1032,7 +1032,9 @@ mod test {
                                 Ok(val) => {
                                     if (senders == 1) && (val != 0) && (val <= cur) {
                                         do_panic.fetch_add(1, Ordering::Relaxed);
-                                        panic!("Non-increasing values read {} last, val was {}", cur, val);
+                                        panic!("Non-increasing values read {} last, val was {}",
+                                               cur,
+                                               val);
                                     }
                                     cur = val;
                                     cref.fetch_add(1, Ordering::Relaxed);
