@@ -153,7 +153,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::multicast_queue(4);
+let (send, recv) = multiqueue::broadcast_queue(4);
 
 for i in 0..2 { // or n
     let cur_recv = recv.add_stream();
@@ -199,7 +199,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::multicast_queue(4);
+let (send, recv) = multiqueue::broadcast_queue(4);
 
 for i in 0..2 { // or n
     let cur_recv = recv.add_stream();
@@ -249,7 +249,7 @@ extern crate multiqueue;
 
 use std::thread;
 
-let (send, recv) = multiqueue::multicast_queue(4);
+let (send, recv) = multiqueue::broadcast_queue(4);
 
 // start like before
 for i in 0..2 { // or n
