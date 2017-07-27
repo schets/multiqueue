@@ -79,9 +79,9 @@ The lines are meant to show the data flow through the queue.
     /      \
 -> #        @-3
 ```
-This is a pretty standard broadcast queue setup - 
+This is a pretty standard broadcast queue setup -
 for each element sent in, it is seen on each stream by that's streams consumer.
- 
+
 
 However, in MultiQueue, each logical consumer might actually be demultiplexed across many actual consumers, like below.
 ```
@@ -96,7 +96,7 @@ If this diagram is redrawn with each of the producers sending in a sequenced ele
 
 
 ```
-t=1|t=2|    t=3    | t=4| 
+t=1|t=2|    t=3    | t=4|
 1 -> #              @-1 (1, 2)
       \            /
        -> 2 -> 1 -> -> @-2' (really @ (1) + @ (2) + @ (nothing yet))
@@ -338,7 +338,7 @@ Single Producer Single Consumer, broadcasted to two different streams: 28 millio
 ```
          @
         /
-# -> ->   
+# -> ->
         \
          @
 ```
@@ -365,7 +365,7 @@ Multi Producer Single Consumer, broadcast to two different streams: 8 million op
 ```
 #        @
  \      /
-  -> -> 
+  -> ->
  /      \
 #        @
 ```
@@ -419,7 +419,7 @@ up to date with the individual feeds and markets fall into disarray.
 but then gotten stuck will block readers from progressing. There is a lockless MPMC bounded queue,
 but it requires a statically known max senders and I don't think can be extended to broadcast.
 In practice, it will rarely ever matter.
- 
+
 <a name = "ft2">2</a> These benchmarks had extremely varying benchmarks so I took the upper bound. On some other machines
 they showed only minor performance differences compared to the spsc case so
 I think in practice the effective throughput will be much higher
