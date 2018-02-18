@@ -15,6 +15,6 @@ categories = ['asynchronous', 'concurrency', 'data-structures', 'algorithms']
 crossbeam = "0.2"
 futures = "0.1.9"
 smallvec = "0.3.1"
-parking_lot = "0.3"
+parking_lot = "0.5"
 time = "0.1.35"
 atomic_utilities = "0.4.0"
